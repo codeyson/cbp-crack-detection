@@ -1,0 +1,17 @@
+# Inference-only requirements (training happens in Colab and is NOT listed here).
+#
+# 1) Install torch + torchvision FIRST, CPU build, using the command for your OS from https://pytorch.org
+#    (a plain "pip install torch" on Linux may download a large GPU build).
+# 2) Then:  pip install -r requirements.txt
+#
+numpy
+scipy
+scikit-image
+opencv-python-headless      # use opencv-python instead if you need cv2.imshow. Never install both.
+segmentation-models-pytorch # TODO: pin with == to the version used in Colab
+timm                        # TODO: pin with == to the version used in Colab
+#
+# Print the Colab versions with:
+#   import sys, torch, torchvision, segmentation_models_pytorch as smp, timm, numpy, scipy, skimage, cv2
+#   print(sys.version)
+#   for m in (torch, torchvision, smp, timm, numpy, scipy, skimage, cv2): print(m.__name__, m.__version__)
