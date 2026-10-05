@@ -1,0 +1,77 @@
+# CBP Crack Detection
+
+Software that checks concrete paving blocks for quality using a camera, a laser and load cells, and sorts each block into Grade A, B or C.
+
+## Why this project exists
+
+Concrete block pavers (CBPs) are usually checked by hand: someone measures them, weighs them and looks for cracks. That is slow and depends on who is checking. Some tests also destroy the block.
+
+This project is the software side of a thesis:
+
+> *Design of a Deep Learning-Based Quality Classification System for Non-Destructive Concrete Block Pavement Grading with Optimized Formula Mixture Recommendation*
+
+The goal is a rig that grades blocks quickly and the same way every time, without damaging them.
+
+## How it works
+
+Three blocks are placed on the rig at a time. Then:
+
+1. **Take a photo.** A camera above the rig takes one picture of all three blocks.
+2. **Find the blocks.** A trained detector (YOLOv8) checks that there are exactly three blocks and labels them Left, Middle and Right. If it does not see three, it asks the user to re-place them.
+3. **Cut out each block.** Each block is cropped into its own image. The edges are trimmed so they are not mistaken for cracks.
+4. **Measure size and weight.** Length and width come from the photo, using a printed marker or a saved calibration to turn pixels into millimetres. Height comes from a laser line that shifts when it hits a taller object. Weight comes from one load cell under each block.
+5. **Find cracks.** A crack model (U-Net) marks every crack pixel on each block. The software then measures the total crack length in millimetres.
+6. **Grade the block.**
+   - If the size or weight is outside the allowed tolerance, the block is **rejected**.
+   - Otherwise, the total crack length decides **Grade A, B or C**.
+   - Chipped, spalled or shattered blocks are **Grade C**.
+
+## Current status
+
+| Part | Status |
+|---|---|
+| Finding the 3 blocks and cropping them | Working |
+| Measuring length, width and height | Working, needs calibration on the real rig |
+| Crack detection and crack length | Working, but **not yet reliable on pavers** (see below) |
+| Weight from load cells | Not built yet |
+| Grading (A/B/C/Reject) | Not built yet. Crack-length thresholds still need to be agreed |
+| One-button run of the whole process | Planned next |
+| Mix formula recommendation | Out of scope for this repo |
+
+## Important things to know
+
+- **The crack model is not trained on pavers yet.** It was trained on a public crack dataset (DeepCrack). It must be fine-tuned on photos from this rig before its results can be trusted.
+- **Calibrate whenever the setup changes.** If the camera or laser moves, redo the calibration, or the measurements will be wrong.
+- **Use one camera.** Training and real use should use the same camera and lighting. Mixing cameras makes the model less accurate.
+- **The grade thresholds must be set before the main data collection.** Changing them afterward means re-checking everything.
+- **Model files are not in this repository.** The trained weights are too large for git. Get them from the team and put them in the `models/` folder.
+- **Only rectangular blocks are supported.**
+
+## What is in this folder
+
+| File | What it does |
+|---|---|
+| `block_detect.py` | Finds the 3 blocks and crops them |
+| `dimensions.py` | Measures length, width and height; calibration tools |
+| `infer.py` | Runs the crack model on a block image |
+| `crack_length.py` | Turns a crack mask into a length |
+| `train_block_yolov8.ipynb` | Trains the block detector (Google Colab) |
+| `crack_pretrain_unet.ipynb` | Trains the crack model (Google Colab) |
+| `COMMANDS.md` | Setup steps and every command to run |
+
+## Getting started
+
+See [COMMANDS.md](COMMANDS.md) for installation, calibration and run commands. To confirm the install works without a camera or model files, run:
+
+```bash
+python block_detect.py --selftest
+python dimensions.py --selftest
+python crack_length.py
+python infer.py --selftest
+```
+
+Each should end with `ALL PASS`.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
