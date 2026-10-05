@@ -7,9 +7,10 @@
 numpy
 scipy
 scikit-image
-opencv-python-headless      # use opencv-python instead if you need cv2.imshow. Never install both.
+opencv-python               # GUI build: the webcam preview needs cv2.imshow. Never install -headless next to it.
 segmentation-models-pytorch # TODO: pin with == to the version used in Colab
 timm                        # TODO: pin with == to the version used in Colab
+ultralytics                 # block detector (YOLOv8). TODO: pin to the version printed by train_block_yolov8.ipynb
 #
 # Print the Colab versions with:
 #   import sys, torch, torchvision, segmentation_models_pytorch as smp, timm, numpy, scipy, skimage, cv2
