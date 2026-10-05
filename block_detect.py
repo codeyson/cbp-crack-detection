@@ -72,8 +72,8 @@ def save(img, res, out, stem):
     print(f"{res['status']}: {res['message'] or 'ok'} -> {out}/{stem}_*")
 
 
-def run_camera(cam, out, width=2560, height=1440, **kw):
-    """Live preview. SPACE saves the raw frame and the crops (only when status is ok), q quits."""
+def open_camera(cam, width=2560, height=1440):
+    """Returns (cap, first_frame). Also used by dimensions.py."""
     cap = cv2.VideoCapture(cam, cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY)
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))   # most webcams only give full resolution as MJPG
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
@@ -82,6 +82,13 @@ def run_camera(cam, out, width=2560, height=1440, **kw):
     ok, frame = cap.read()
     assert ok, f"could not read camera {cam}"
     print(f"camera delivers {frame.shape[1]}x{frame.shape[0]} (asked {width}x{height})")
+    return cap, frame
+
+
+def run_camera(cam, out, **kw):
+    """Live preview. SPACE saves the raw frame and the crops (only when status is ok), q quits."""
+    cap, frame = open_camera(cam)
+    ok = True
     while ok:
         res = detect_blocks(frame, **kw)
         vis = draw_overlay(frame, res)
