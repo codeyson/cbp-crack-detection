@@ -9,9 +9,7 @@ Setup on the mini PC:   pip install numpy scipy scikit-image opencv-python-headl
 
 Self-test (needs only numpy):   python infer.py --selftest
 Run on a photo:
-    python infer.py --img block.jpg --ckpt unet_efficientnet-b0_best.pth \
-                    --backbone efficientnet-b0 --out results --threads 4
-Optionally add  --mm_per_px 0.1  to also print crack length (needs crack_length.py next to this file).
+    python infer.py --img block.jpg --out results --threads 4      (models/unet_efficientnet-b0_best.pth by default)
 """
 import argparse
 import os
@@ -81,6 +79,18 @@ def make_predict_fn(model, device="cpu"):
     return fn
 
 
+def load_predict_fn(ckpt, backbone, threads=0, tile=256):
+    """Model setup shared by infer.py and pipeline.py: threads (0 = library default), cuda if available,
+    load the checkpoint, one warm-up tile. Returns (predict_fn, device)."""
+    import torch
+    if threads > 0:
+        torch.set_num_threads(threads)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    fn = make_predict_fn(load_model(ckpt, backbone, device), device)
+    fn(np.zeros((1, tile, tile, 3), np.uint8))              # warm-up, excluded from timing
+    return fn, device
+
+
 def selftest():
     """Tiling/blending logic only, using a fake predictor. Does NOT test the neural network."""
     rng = np.random.default_rng(0)
@@ -97,41 +107,65 @@ def selftest():
         ok = out.shape == shape and np.allclose(out, img[..., 0] / 255.0, atol=1e-5)
         ok_all &= ok
         print(f"[{'PASS' if ok else 'FAIL'}] {shape}: output shape {out.shape}, {n_tiles[0]} tiles, blends back to input")
+    ok_all &= selftest_load_predict_fn()
     print("selftest:", "ALL PASS" if ok_all else "FAILURES")
     return ok_all
+
+
+def selftest_load_predict_fn(backbone="efficientnet-b0"):
+    """load_predict_fn == load_model + make_predict_fn, threads applied. Random-weight checkpoint, no real
+    weights needed. Skipped (counts as pass) when torch / segmentation-models-pytorch are not installed."""
+    try:
+        import torch
+        import segmentation_models_pytorch as smp
+    except ImportError:
+        print("[SKIP] load_predict_fn: torch or segmentation-models-pytorch not installed")
+        return True
+    import tempfile
+    p = os.path.join(tempfile.mkdtemp(), "rand.pth")
+    torch.manual_seed(0)
+    torch.save(smp.Unet(backbone, encoder_weights=None, in_channels=3, classes=1).state_dict(), p)
+    old = torch.get_num_threads()
+    try:
+        fn, device = load_predict_fn(p, backbone, threads=1)
+        threads_ok = torch.get_num_threads() == 1
+    finally:
+        torch.set_num_threads(old)
+    tiles = np.random.default_rng(0).integers(0, 256, (2, 256, 256, 3), dtype=np.uint8)
+    got = fn(tiles)
+    want = make_predict_fn(load_model(p, backbone, device), device)(tiles)
+    ok = threads_ok and got.shape == (2, 256, 256) and np.allclose(got, want, atol=1e-5)
+    print(f"[{'PASS' if ok else 'FAIL'}] load_predict_fn: device {device}, threads set {threads_ok}, "
+          f"output {got.shape}, matches load_model + make_predict_fn")
+    return ok
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
-    ap.add_argument("--img"); ap.add_argument("--ckpt"); ap.add_argument("--backbone")
+    ap.add_argument("--img")
+    ap.add_argument("--ckpt", default="models/unet_efficientnet-b0_best.pth")
+    ap.add_argument("--backbone", default="efficientnet-b0")
     ap.add_argument("--out", default="results")
     ap.add_argument("--tile", type=int, default=256)
     ap.add_argument("--overlap", type=int, default=64)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--thresh", type=float, default=0.5)
     ap.add_argument("--threads", type=int, default=0, help="CPU threads (0 = library default)")
-    ap.add_argument("--mm_per_px", type=float, default=0.0)
     a = ap.parse_args()
 
     if a.selftest:
         raise SystemExit(0 if selftest() else 1)
-    if not (a.img and a.ckpt and a.backbone):
-        ap.error("--img, --ckpt and --backbone are required")
+    if not a.img:
+        ap.error("--img is required")
 
     import cv2
-    import torch
-    if a.threads > 0:
-        torch.set_num_threads(a.threads)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     bgr = cv2.imread(a.img)
     assert bgr is not None, f"could not read {a.img}"
     img = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
-    model = load_model(a.ckpt, a.backbone, device)
-    fn = make_predict_fn(model, device)
-    fn(np.zeros((1, a.tile, a.tile, 3), np.uint8))          # warm-up, excluded from timing
+    fn, device = load_predict_fn(a.ckpt, a.backbone, a.threads, a.tile)
 
     t0 = time.time()
     prob = predict_tiled(img, fn, a.tile, a.overlap, a.batch)
@@ -145,10 +179,6 @@ def main():
     over = img.copy(); over[mask] = (255, 0, 0)
     cv2.imwrite(f"{a.out}/{stem}_overlay.png", cv2.cvtColor(over, cv2.COLOR_RGB2BGR))
 
-    if a.mm_per_px > 0:
-        from crack_length import crack_length_mm
-        res = crack_length_mm(mask, a.mm_per_px)
-        print(f"crack length: {res['length_mm']:.1f} mm in {res['n_pieces']} piece(s)")
     print("saved to", a.out)
 
 

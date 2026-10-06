@@ -35,7 +35,7 @@ Three blocks are placed on the rig at a time. Then:
 | Crack detection and crack length | Working, but **not yet reliable on pavers** (see below) |
 | Weight from load cells | Not built yet |
 | Grading (A/B/C/Reject) | Not built yet. Crack-length thresholds still need to be agreed |
-| One-button run of the whole process | Planned next |
+| One-button run of the whole process (`pipeline.py`) | Working (no grading yet) |
 | Mix formula recommendation | Out of scope for this repo |
 
 ## Important things to know
@@ -44,33 +44,56 @@ Three blocks are placed on the rig at a time. Then:
 - **Calibrate whenever the setup changes.** If the camera or laser moves, redo the calibration, or the measurements will be wrong.
 - **Use one camera.** Training and real use should use the same camera and lighting. Mixing cameras makes the model less accurate.
 - **The grade thresholds must be set before the main data collection.** Changing them afterward means re-checking everything.
-- **Model files are not in this repository.** The trained weights are too large for git. Get them from the team and put them in the `models/` folder.
+- **Model files are not in git.** `python download_models.py` fetches them from the GitHub Release into `models/`.
 - **Only rectangular blocks are supported.**
 
 ## What is in this folder
 
 | File | What it does |
 |---|---|
+| `pipeline.py` | Runs everything on one capture: blocks, size, cracks. Start here |
+| `download_models.py` | Downloads the trained models into `models/` |
 | `block_detect.py` | Finds the 3 blocks and crops them |
 | `dimensions.py` | Measures length, width and height; calibration tools |
 | `infer.py` | Runs the crack model on a block image |
 | `crack_length.py` | Turns a crack mask into a length |
 | `train_block_yolov8.ipynb` | Trains the block detector (Google Colab) |
 | `crack_pretrain_unet.ipynb` | Trains the crack model (Google Colab) |
+| `marker.png` | ArUco marker to print for the mm scale |
 | `COMMANDS.md` | Setup steps and every command to run |
 
 ## Getting started
 
-See [COMMANDS.md](COMMANDS.md) for installation, calibration and run commands. To confirm the install works without a camera or model files, run:
+Needs Python 3.11 and git. On Windows:
 
 ```bash
-python block_detect.py --selftest
-python dimensions.py --selftest
-python crack_length.py
-python infer.py --selftest
+git clone https://github.com/codeyson/cbp-crack-detection.git
+cd cbp-crack-detection
+python -m venv venv
+venv\Scriptsctivate
+pip install -r requirements.txt
+python download_models.py
+python pipeline.py --cam 0
 ```
 
-Each should end with `ALL PASS`.
+A window shows the camera with a box around each block. Press SPACE to run the whole check, q to quit. Results are saved in `pipeline_out/`.
+
+- No camera at hand: `python pipeline.py --img some_photo.png`
+- Wrong camera: try `--cam 1`
+- Lengths in mm need a scale: print `marker.png`, measure its black square with calipers, place it beside the blocks at block-top height, add `--scale_ref <mm>`. Details in "1.2 Dimensions" in [COMMANDS.md](COMMANDS.md).
+- Already cloned: `git pull`, then `pip install -r requirements.txt` if it changed.
+
+Check the install without a camera:
+
+```bash
+python pipeline.py --selftest
+```
+
+It should end with `ALL PASS`. All commands and calibration steps are in [COMMANDS.md](COMMANDS.md).
+
+## Credits
+
+The crack model was pretrained on DeepCrack (Liu et al., 2019, CC BY 4.0).
 
 ## License
 

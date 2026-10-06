@@ -14,9 +14,8 @@ Scale (mm/px), pick one:
 
 Examples:
   python dimensions.py --make_marker marker.png                       (print it, measure the black square)
-  python dimensions.py --img rig.jpg --weights models/block_yolov8n_best.pt --scale_ref 50 --height_mm 60
-  python dimensions.py --img off.jpg --laser_on on.jpg --weights ... --calib calib.json
-  python dimensions.py --cam 0 --weights ... --calib calib.json       (SPACE measure, L add laser frame, q quit)
+  python dimensions.py --img rig.jpg --scale_ref 50 --height_mm 60
+  python dimensions.py --img off.jpg --laser_on on.jpg --calib calib.json
   python dimensions.py --calibrate_camera checker_photos/ --board 9x6 --square_mm 25 --calib calib.json
   python dimensions.py --fit_laser laser_samples.csv --calib calib.json   (CSV rows: shift_px,height_mm)
   python dimensions.py --selftest
@@ -27,12 +26,11 @@ import argparse
 import glob
 import json
 import os
-import time
 
 import cv2
 import numpy as np
 
-from block_detect import detect_blocks, open_camera
+from block_detect import detect_blocks
 
 ARUCO = cv2.aruco.DICT_4X4_50
 
@@ -191,6 +189,11 @@ def fit_laser(csv_path):
 
 
 # ------------------------------------------------------------------------------------------- pipeline
+def calib_from(res):
+    """Scale values measure() used, for --save_calib ({} when the marker was not found)."""
+    return {k: res[k] for k in ("mm_per_px_bed", "cam_height_mm") if res.get(k) is not None}
+
+
 def check_tolerance(dims, nominal=None, tol=None):
     """dims/nominal/tol: (L, W, H) in mm, H may be None. Returns (status, reasons). status: pass|fail|no_standard."""
     if not nominal or not tol:
@@ -238,7 +241,7 @@ def measure(img, model, calib, scale_ref=None, laser_on=None, height_mm=None, no
             b["tolerance"], b["reasons"] = "bad_outline", [f"outline fills {b['fill']:.2f} of its rectangle"]
     if height_mm is None and not any(b.get("H_mm") for b in res["blocks"]) and sc.get("cam_height_mm"):
         warn.append("no block height (laser or --height_mm): L/W read too large")
-    res.update(warnings=warn, image=img)
+    res.update(warnings=warn, image=img, mm_per_px_bed=sc["mm_per_px_bed"], cam_height_mm=sc.get("cam_height_mm"))
     return res
 
 
@@ -276,43 +279,9 @@ def save(res, out, stem):
     print(f"{res['status']}: {res['message'] or 'ok'} -> {out}/{stem}_dims.*")
 
 
-def run_camera(cam, out, **kw):
-    """SPACE: measure with laser OFF. L: (after SPACE) turn the laser on, press L to add height. q quits."""
-    cap, frame = open_camera(cam)
-    off, ok = None, True
-    while ok:
-        cv2.imshow("dimensions (SPACE measure, L laser frame, q quit)", cv2.resize(frame, None, fx=1280 / frame.shape[1], fy=1280 / frame.shape[1]))
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord("q"):
-            break
-        if key in (ord(" "), ord("l")):
-            if key == ord(" "):
-                off = frame.copy()
-            elif off is None:
-                print("press SPACE (laser off) first")
-                ok, frame = cap.read()
-                continue
-            stem = time.strftime("%Y%m%d_%H%M%S")
-            res = measure(off, laser_on=frame if key == ord("l") else None, **kw)
-            os.makedirs(out, exist_ok=True)
-            cv2.imwrite(f"{out}/{stem}_off.png", off)
-            if key == ord("l"):
-                cv2.imwrite(f"{out}/{stem}_laser.png", frame)
-            save(res, out, stem)
-            cv2.imshow("result", cv2.resize(draw(res["image"], res), None, fx=1280 / frame.shape[1], fy=1280 / frame.shape[1]))
-        ok, frame = cap.read()
-    cap.release()
-    cv2.destroyAllWindows()
-
-
 # ---------------------------------------------------------------------------------------------- tests
 def selftest():
-    from types import SimpleNamespace as NS
-
-    class FakeYOLO:
-        def __init__(self, boxes): self.boxes = np.array(boxes, np.float32)
-        def predict(self, img, conf, verbose):
-            return [NS(boxes=NS(xyxy=NS(cpu=lambda: self.boxes)))]
+    from block_detect import FakeYOLO
 
     # 1. Pinhole scene: camera 400 mm above the bed, 0.25 mm/px on the bed (f = 1600 px), blocks 200x100x60 mm.
     #    Each block is drawn as the hull of its bottom and top faces, so off-centre blocks show a side wall.
@@ -366,16 +335,25 @@ def selftest():
     assert [b["tolerance"] for b in r["blocks"]] == ["fail", "pass", "fail"], [b["reasons"] for b in r["blocks"]]
     assert check_tolerance((200, 100, None), (200, 100, 60), (1, 1, 1)) == ("pass", [])
     assert check_tolerance((200, 100, 60))[0] == "no_standard"
+
+    # 4. --save_calib stores the scale measure() used: same values as a separate marker_scale() pass
+    mk = cv2.aruco.generateImageMarker(cv2.aruco.getPredefinedDictionary(ARUCO), 0, 160)
+    scene = img.copy()
+    scene[20:220, 20:220] = 255
+    scene[40:200, 40:200] = mk[..., None]                           # 160 px marker, say 40 mm -> 0.25 mm/px
+    r = measure(scene, FakeYOLO(boxes), {}, scale_ref=40.0, height_mm=hgt)
+    assert calib_from(r) == marker_scale(scene, 40.0, {}), (calib_from(r), marker_scale(scene, 40.0, {}))
+    assert abs(calib_from(r)["mm_per_px_bed"] - 0.25) < 0.01, calib_from(r)
+    assert calib_from(dict(status="no_marker")) == {}
     print("selftest: ALL PASS")
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
-    ap.add_argument("--weights")
+    ap.add_argument("--weights", default="models/best.pt")
     ap.add_argument("--img", help="laser-OFF photo")
     ap.add_argument("--laser_on", help="same scene, laser ON (for height)")
-    ap.add_argument("--cam", type=int)
     ap.add_argument("--calib", default="calib.json")
     ap.add_argument("--save_calib", action="store_true", help="store the --scale_ref result in --calib")
     ap.add_argument("--scale_ref", type=float, help="ArUco marker black-square side in mm (measured)")
@@ -383,7 +361,6 @@ def main():
     ap.add_argument("--nominal", help="L,W,H mm, e.g. 200,100,60 (from the standard)")
     ap.add_argument("--tol", help="L,W,H tolerance mm, e.g. 1.6,1.6,3.2 (from the standard)")
     ap.add_argument("--conf", type=float, default=0.5)
-    ap.add_argument("--n", type=int, default=3)
     ap.add_argument("--out", default="dims_out")
     ap.add_argument("--calibrate_camera", metavar="DIR")
     ap.add_argument("--board", default="9x6", help="checkerboard INNER corners, cols x rows")
@@ -402,25 +379,19 @@ def main():
         return save_calib(a.calib, **calibrate_camera(a.calibrate_camera, tuple(map(int, a.board.split("x"))), a.square_mm))
     if a.fit_laser:
         return save_calib(a.calib, laser_coef=fit_laser(a.fit_laser))
-    if not a.weights:
-        ap.error("--weights is required")
     from ultralytics import YOLO
     triple = lambda s: tuple(map(float, s.split(","))) if s else None
     calib = load_calib(a.calib)
     kw = dict(model=YOLO(a.weights), calib=calib, scale_ref=a.scale_ref, height_mm=a.height_mm,
-              nominal=triple(a.nominal), tol=triple(a.tol), n_expected=a.n, conf=a.conf)
-    if a.cam is not None:
-        return run_camera(a.cam, a.out, **kw)
+              nominal=triple(a.nominal), tol=triple(a.tol), conf=a.conf)
     if not a.img:
-        ap.error("--img or --cam is required")
+        ap.error("--img is required")
     img = cv2.imread(a.img)
     assert img is not None, f"could not read {a.img}"
     on = cv2.imread(a.laser_on) if a.laser_on else None
     res = measure(img, laser_on=on, **kw)
-    if a.save_calib and a.scale_ref:
-        m = marker_scale(undistort(img, calib), a.scale_ref, calib)
-        if m:
-            save_calib(a.calib, **m)
+    if a.save_calib and a.scale_ref and calib_from(res):
+        save_calib(a.calib, **calib_from(res))
     save(res, a.out, os.path.splitext(os.path.basename(a.img))[0])
     raise SystemExit(0 if res["status"] == "ok" else 1)
 
