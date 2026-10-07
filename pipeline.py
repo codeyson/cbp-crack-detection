@@ -7,7 +7,8 @@ No grading yet (thresholds not signed off).
 
 Live:     python pipeline.py --cam 0          (models/best.pt + models/unet_efficientnet-b0_best.pth by default)
           SPACE runs everything (laser off), L reruns with the current frame as the laser-ON frame, q quits.
-Offline:  python pipeline.py --img captures/xxx_raw.png [--laser_on on.png]
+          --side_cam 1: second camera, side view, measures height (models/height_detection.pt); SPACE grabs both.
+Offline:  python pipeline.py --img captures/xxx_raw.png [--laser_on on.png] [--side_img side.png]
 Self-test: python pipeline.py --selftest
 
 Scale: --scale_ref (ArUco in frame) or mm_per_px_bed in --calib. Neither: dims skipped, crack length in px only.
@@ -22,25 +23,26 @@ import numpy as np
 
 from block_detect import detect_blocks, draw_overlay, open_camera
 from crack_length import crack_length_mm
-from dimensions import draw as draw_dims, load_calib, measure, undistort
+from dimensions import draw as draw_dims, draw_side, load_calib, measure, side_heights, undistort
 from infer import predict_tiled
 
 
 def run(off, model, predict_fn, calib, laser_on=None, scale_ref=None, height_mm=None, nominal=None, tol=None,
-        thresh=0.5, **det_kw):
+        thresh=0.5, side=None, side_model=None, **det_kw):
     """off = laser-OFF frame (BGR). Returns measure()-style dict + per-block crack fields, "dims", "timings".
     Crack model only runs when status == "ok"."""
     t0 = time.perf_counter()
     res = dict(status="no_scale")
     if scale_ref or "mm_per_px_bed" in calib:
         res = measure(off, model, calib, scale_ref=scale_ref, laser_on=laser_on, height_mm=height_mm,
-                      nominal=nominal, tol=tol, **det_kw)
+                      nominal=nominal, tol=tol, side=side, side_model=side_model, **det_kw)
     res["dims"] = res["status"] not in ("no_scale", "no_marker")
     if not res["dims"]:
         why = "ArUco marker not found" if res["status"] == "no_marker" else "no scale"
         img = undistort(off, calib)
         res = dict(detect_blocks(img, model, **det_kw), image=img, dims=False,
-                   warnings=[f"{why}: dimensions skipped, crack length in px only"])
+                   warnings=[f"{why}: dimensions skipped, crack length in px only"]
+                   + (["side camera not used: height needs the dimensions scale"] if side is not None else []))
     res["timings"] = {"detect_dims_s": round(time.perf_counter() - t0, 3)}
     if res["status"] != "ok":
         return res
@@ -87,8 +89,11 @@ def save(res, off, laser_on, out, meta):
     cv2.imwrite(f"{d}/off.png", off)
     if laser_on is not None:
         cv2.imwrite(f"{d}/laser.png", laser_on)
+    if "side" in res:
+        cv2.imwrite(f"{d}/side.png", res["side"]["image"])
+        cv2.imwrite(f"{d}/side_overlay.png", draw_side(res["side"]["image"], res["side"]))
     cv2.imwrite(f"{d}/overlay.png", draw(res))
-    keep = ("label", "L_mm", "W_mm", "H_mm", "H_source", "shift_px", "fill", "tolerance", "reasons",
+    keep = ("label", "L_mm", "W_mm", "H_mm", "H_source", "shift_px", "side_px", "fill", "tolerance", "reasons",
             "crack_mm", "crack_px", "crack_pieces", "crack_mm_per_px")
     blocks = []
     for b in res["blocks"]:
@@ -107,15 +112,21 @@ def save(res, off, laser_on, out, meta):
     print(f"timings {res['timings']} -> {d}")
 
 
-def run_camera(cam, out, meta, **kw):
-    """Preview shows the YOLO boxes. SPACE: full pipeline on the laser-OFF frame. L: rerun with laser ON. q quits."""
+def run_camera(cam, out, meta, side_cam=None, **kw):
+    """Preview shows the YOLO boxes. SPACE: full pipeline on the laser-OFF frame (+ side frame). L: rerun with
+    laser ON. q quits. side_cam: second camera, side view, preview shows its measured edges and height in px."""
     cap, frame = open_camera(cam)
-    off, ok = None, True
+    side_cap, side_frame = open_camera(side_cam) if side_cam is not None else (None, None)
+    off, side, ok = None, None, True
     det_kw = {k: kw[k] for k in ("model", "conf")}
     fx = 1280 / frame.shape[1]
     while ok:
         cv2.imshow("pipeline (SPACE run, L laser frame, q quit)",
                    cv2.resize(draw_overlay(frame, detect_blocks(frame, **det_kw)), None, fx=fx, fy=fx))
+        if side_cap is not None:
+            sv = draw_side(side_frame, side_heights(side_frame, kw["side_model"], conf=kw["conf"],
+                                                    flip=kw["calib"].get("side_flip", False)))
+            cv2.imshow("side camera (height)", cv2.resize(sv, None, fx=960 / sv.shape[1], fy=960 / sv.shape[1]))
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
             break
@@ -124,15 +135,20 @@ def run_camera(cam, out, meta, **kw):
         elif key in (ord(" "), ord("l")):
             if key == ord(" "):
                 off = frame.copy()
+                side = side_frame.copy() if side_cap is not None else None
             on = frame.copy() if key == ord("l") else None
-            res = run(off, laser_on=on, **kw)
+            res = run(off, laser_on=on, side=side, **kw)
             if res["status"] == "ok":
                 save(res, off, on, out, meta)
             else:
                 print(f"not saved: {res['message']}  {res['warnings']}")
             cv2.imshow("result", cv2.resize(draw(res), None, fx=fx, fy=fx))
         ok, frame = cap.read()
+        if side_cap is not None:
+            ok, side_frame = side_cap.read()
     cap.release()
+    if side_cap is not None:
+        side_cap.release()
     cv2.destroyAllWindows()
 
 
@@ -163,6 +179,14 @@ def selftest():
 
     r = run(img, FakeYOLO(boxes[:2]), dark, {})                      # wrong count: crack model skipped
     assert r["status"] == "wrong_count" and "crack_px" not in r["blocks"][0]
+
+    side = np.full((800, 1600, 3), 200, np.uint8)                     # side view: faces 250 px tall
+    sboxes = [[x, 350, x + 400, 600] for x in (100, 600, 1100)]
+    for x1, _, x2, _ in sboxes:
+        side[350:600, x1:x2] = np.clip(rng.normal(95, 25, (250, 400, 3)), 0, 255)
+    r = run(img, yolo, dark, dict(mm_per_px_bed=0.5, side_coef=[0.2, 0.0]), side=side, side_model=FakeYOLO(sboxes))
+    assert [b["H_source"] for b in r["blocks"]] == ["side"] * 3 and all(abs(b["H_mm"] - 50) < 0.5 for b in r["blocks"])
+    assert "side" in r and draw(r).shape == img.shape
     print("selftest: ALL PASS")
 
 
@@ -172,6 +196,9 @@ def main():
     ap.add_argument("--cam", type=int)
     ap.add_argument("--img", help="laser-OFF photo")
     ap.add_argument("--laser_on", help="same scene, laser ON (for height)")
+    ap.add_argument("--side_cam", type=int, help="second webcam index, side view (height)")
+    ap.add_argument("--side_img", help="side-view photo of the same scene (height)")
+    ap.add_argument("--side_weights", default="models/height_detection.pt", help="side-view YOLO")
     ap.add_argument("--weights", default="models/best.pt", help="YOLO block detector")
     ap.add_argument("--ckpt", default="models/unet_efficientnet-b0_best.pth", help="crack U-Net checkpoint")
     ap.add_argument("--backbone", default="efficientnet-b0")
@@ -188,7 +215,8 @@ def main():
     a = ap.parse_args()
     if a.selftest:
         return selftest()
-    for p in (a.weights, a.ckpt):
+    use_side = a.side_cam is not None or a.side_img
+    for p in (a.weights, a.ckpt) + ((a.side_weights,) if use_side else ()):
         if not os.path.exists(p):
             ap.error(f"{p} not found: run  python download_models.py")
     from ultralytics import YOLO
@@ -197,17 +225,19 @@ def main():
     triple = lambda s: tuple(map(float, s.split(","))) if s else None
     kw = dict(model=YOLO(a.weights), predict_fn=fn, calib=load_calib(a.calib), scale_ref=a.scale_ref,
               height_mm=a.height_mm, nominal=triple(a.nominal), tol=triple(a.tol), thresh=a.thresh,
-              conf=a.conf, edge_frac=a.edge_frac)
+              conf=a.conf, edge_frac=a.edge_frac, side_model=YOLO(a.side_weights) if use_side else None)
     meta = dict(weights=os.path.basename(a.weights), ckpt=os.path.basename(a.ckpt), backbone=a.backbone,
                 thresh=a.thresh, edge_frac=a.edge_frac, device=device)
     if a.cam is not None:
-        return run_camera(a.cam, a.out, meta, **kw)
+        return run_camera(a.cam, a.out, meta, side_cam=a.side_cam, **kw)
     if not a.img:
         ap.error("--img or --cam is required")
     off = cv2.imread(a.img)
     assert off is not None, f"could not read {a.img}"
     on = cv2.imread(a.laser_on) if a.laser_on else None
-    res = run(off, laser_on=on, **kw)
+    side = cv2.imread(a.side_img) if a.side_img else None
+    assert a.side_img is None or side is not None, f"could not read {a.side_img}"
+    res = run(off, laser_on=on, side=side, **kw)
     if res["status"] != "ok":
         print(f"{res['status']}: {res['message']}  {res['warnings']}")
         raise SystemExit(1)

@@ -89,6 +89,23 @@ python dimensions.py --fit_laser laser_samples.csv --calib calib.json
 
 Aim for max residual <= 0.3 mm. Redo calibration whenever the camera or laser moves.
 
+Side-camera height (replaces the laser). Mount the second camera level with the blocks, lens at about half the block
+height (above the tops it sees a strip of the top face), facing the long side of the row so all 3 blocks stand side
+by side, plain backdrop behind. Needs `models/height_detection.pt`. Calibrate with blocks measured by calipers:
+photograph them on the rig, print each block's `side_px`, and write a CSV with rows `side_px,height_mm`:
+
+```bash
+python dimensions.py --side_img side.jpg --conf 0.3
+```
+
+```bash
+python dimensions.py --fit_side side_samples.csv --calib calib.json
+```
+
+Use at least 6 blocks of different heights (or the same blocks raised on shims of known thickness). If the side
+camera looks at the row from the back, so its left is the top camera's right, add `"side_flip": true` to `calib.json`.
+Redo the fit whenever the side camera moves.
+
 ### Measuring
 
 Photo with the marker in frame, assumed block height (no laser yet):
@@ -131,7 +148,16 @@ Note: the model is DeepCrack-pretrained only. It is not reliable on pavers until
 
 Detect + crop, dimensions, crack mask and crack length for all 3 blocks in one go. No grading yet.
 
-Live webcam. SPACE runs everything (laser off), then turn the laser on and press L to rerun with height, q quits:
+Two cameras, top + side (height from the side camera, after `--fit_side`). SPACE grabs both, q quits:
+
+```bash
+python pipeline.py --cam 0 --side_cam 1 --calib calib.json
+```
+
+Offline with a side photo: `python pipeline.py --img top.png --side_img side.png --calib calib.json`.
+If the second camera does not open, plug it into a different USB port (two 2K cameras can overload one port).
+
+Live webcam with the laser instead. SPACE runs everything (laser off), then turn the laser on and press L to rerun with height, q quits:
 
 ```bash
 python pipeline.py --cam 0 --calib calib.json
@@ -144,8 +170,8 @@ python pipeline.py --img captures/<stamp>_raw.png
 ```
 
 Scale: `--scale_ref 50` (ArUco in frame) or `mm_per_px_bed` in `--calib`. With neither, dimensions are skipped and crack length is in px.
-Also takes `--conf` (default 0.3 here), `--edge_frac` (default 0.10), `--weights`, `--ckpt`, `--laser_on`, `--height_mm`, `--nominal`, `--tol`, `--thresh`, `--threads`, `--backbone`.
-Output: `pipeline_out/<timestamp>/` with `off.png`, `laser.png`, `overlay.png`, `<Label>_crop.png`, `<Label>_mask.png`, `summary.json` (values, warnings, per-step timings, model names). Nothing is saved unless exactly 3 blocks are found.
+Also takes `--conf` (default 0.3 here), `--edge_frac` (default 0.10), `--weights`, `--ckpt`, `--laser_on`, `--side_weights`, `--height_mm`, `--nominal`, `--tol`, `--thresh`, `--threads`, `--backbone`.
+Output: `pipeline_out/<timestamp>/` with `off.png`, `laser.png`, `side.png`, `side_overlay.png`, `overlay.png`, `<Label>_crop.png`, `<Label>_mask.png`, `summary.json` (values, warnings, per-step timings, model names). Nothing is saved unless exactly 3 blocks are found.
 
 ## Training (Google Colab, not on this PC)
 

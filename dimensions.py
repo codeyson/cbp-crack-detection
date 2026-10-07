@@ -30,7 +30,7 @@ import os
 import cv2
 import numpy as np
 
-from block_detect import detect_blocks
+from block_detect import detect_blocks, draw_overlay
 
 ARUCO = cv2.aruco.DICT_4X4_50
 
@@ -177,15 +177,55 @@ def laser_shifts(rows, boxes, margin_frac=0.15):
     return out
 
 
-def fit_laser(csv_path):
-    """CSV rows shift_px,height_mm (a header line is fine) -> linear coef and residuals."""
+def fit_laser(csv_path, x_name="shift_px"):
+    """CSV rows <x_name>,height_mm (a header line is fine) -> linear coef and residuals. Also used for the side camera."""
     d = np.genfromtxt(csv_path, delimiter=",", skip_header=0, invalid_raise=False)
     d = d[~np.isnan(d).any(axis=1)]
     coef = np.polyfit(d[:, 0], d[:, 1], 1)
     res = d[:, 1] - np.polyval(coef, d[:, 0])
-    print(f"height_mm = {coef[0]:.5f} * shift_px + {coef[1]:.3f}   max |residual| {abs(res).max():.3f} mm "
+    print(f"height_mm = {coef[0]:.5f} * {x_name} + {coef[1]:.3f}   max |residual| {abs(res).max():.3f} mm "
           f"(aim <= 0.3; if worse try separate fits per Left/Middle/Right)")
     return coef.tolist()
+
+
+def side_heights(img, model, conf=0.5, flip=False, mid_frac=0.7, search_frac=0.08):
+    """Side camera (lens about level with the blocks): front-face height in px of each block.
+    YOLO (models/height_detection.pt) finds each front face; its box edges are a few px off, so in every column of
+    the middle mid_frac of the box the vertical brightness change is averaged across columns (concrete texture
+    averages out, straight edges add up) and the strongest row within search_frac of the box edges is the edge.
+    The top is searched at/below the box top: a lens above the block tops shows a strip of the top face, and its far
+    edge (the silhouette) is not the block height. On 28 labelled photos this cut the spread between the 3 blocks of
+    one photo from 9.2 to 8.5 px vs the raw box; box_px is kept so calipers can decide (--fit_side on either).
+    flip: the side camera faces the row from the other side, so its left-to-right order is Right, Middle, Left.
+    ponytail: lens at about block mid-height removes the top strip and the ambiguity."""
+    res = detect_blocks(img, model, conf=conf)
+    gray = cv2.GaussianBlur(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), (5, 5), 0)
+    gy = np.abs(cv2.Sobel(gray, cv2.CV_32F, 0, 1))
+    for b in res["blocks"]:
+        x1, y1, x2, y2 = b["box"]
+        m, s = int((1 - mid_frac) / 2 * (x2 - x1)), max(2, int(search_frac * (y2 - y1)))
+        cols = slice(x1 + m, max(x2 - m, x1 + m + 1))
+        b0 = max(0, y2 - s)
+        top = y1 + float(gy[y1:y1 + s, cols].mean(axis=1).argmax())     # at/below the box top: front-face edge,
+        bottom = b0 + float(gy[b0:y2 + s, cols].mean(axis=1).argmax())  # not the far edge of a visible top strip
+        b.update(top=top, bottom=bottom, h_px=bottom - top, box_px=float(y2 - y1))
+        if flip:
+            b["label"] = {"Left": "Right", "Right": "Left"}.get(b["label"], b["label"])
+    res["image"] = img
+    return res
+
+
+def draw_side(img, res):
+    """Side photo: YOLO boxes, the measured top/bottom edges (red) and the height in px (mm is on the top overlay)."""
+    vis = draw_overlay(img, res)
+    s = max(0.6, vis.shape[1] / 1500.0)
+    for b in res["blocks"]:
+        if "h_px" in b:
+            x1, _, x2, y2 = b["box"]
+            for y in (b["top"], b["bottom"]):
+                cv2.line(vis, (x1, round(y)), (x2, round(y)), (0, 0, 255), max(1, round(s)))
+            cv2.putText(vis, f"{b['h_px']:.1f} px",(x1 + 10, y2 - int(15 * s)), cv2.FONT_HERSHEY_SIMPLEX, s, (0, 0, 255), max(2, round(s * 2)))
+    return vis
 
 
 # ------------------------------------------------------------------------------------------- pipeline
@@ -204,8 +244,9 @@ def check_tolerance(dims, nominal=None, tol=None):
 
 
 def measure(img, model, calib, scale_ref=None, laser_on=None, height_mm=None, nominal=None, tol=None,
-            min_fill=0.85, **det_kw):
-    """img = laser-OFF frame (BGR). Returns {"status", "message", "warnings", "blocks"}; status from detect_blocks."""
+            min_fill=0.85, side=None, side_model=None, **det_kw):
+    """img = laser-OFF frame (BGR). Returns {"status", "message", "warnings", "blocks"}; status from detect_blocks.
+    side = side-camera frame + side_model (height YOLO): its height replaces the laser's when calibrated (side_coef)."""
     img = undistort(img, calib)
     sc = dict(calib)
     if scale_ref:
@@ -222,12 +263,25 @@ def measure(img, model, calib, scale_ref=None, laser_on=None, height_mm=None, no
         shifts = laser_shifts(laser_line(undistort(laser_on, calib), img), [b["box"] for b in res["blocks"]])
         if "laser_coef" not in sc:
             warn.append("laser not calibrated (--fit_laser): height not measured, shift_px only")
+    side_px = {}
+    if side is not None:
+        res["side"] = side_heights(side, side_model, conf=det_kw.get("conf", 0.5), flip=sc.get("side_flip", False))
+        if res["side"]["status"] != "ok":
+            warn.append(f"side camera: {res['side']['message']} Side height not measured.")
+        else:
+            side_px = {s["label"]: s["h_px"] for s in res["side"]["blocks"]}
+        if "side_coef" not in sc:
+            warn.append("side camera not calibrated (--fit_side): height not measured, side_px only")
     if not sc.get("cam_height_mm"):
         warn.append("camera height unknown: no side-wall/height correction, L/W read too large")
     cxy = (np.array(sc["K"])[:2, 2] if "K" in sc else np.array(img.shape[1::-1]) / 2)
     for b, sh in zip(res["blocks"], shifts):
         H = float(np.polyval(sc["laser_coef"], sh)) if sh is not None and "laser_coef" in sc else None
-        b.update(shift_px=sh, H_mm=H, H_source="laser" if H is not None else "not measured")
+        src = "laser" if H is not None else "not measured"
+        px = side_px.get(b["label"])
+        if px is not None and "side_coef" in sc:
+            H, src = float(np.polyval(sc["side_coef"], px)), "side"
+        b.update(shift_px=sh, side_px=px, H_mm=H, H_source=src)
         out = outline_rect(img, b["box"])
         if out is None:
             b.update(L_mm=None, W_mm=None, tolerance="no_outline", reasons=["outline not found"])
@@ -267,12 +321,15 @@ def draw(img, res):
 def save(res, out, stem):
     os.makedirs(out, exist_ok=True)
     cv2.imwrite(f"{out}/{stem}_dims.png", draw(res["image"], res))
-    keep = ("label", "box", "L_mm", "W_mm", "H_mm", "H_source", "shift_px", "fill", "tolerance", "reasons")
+    if "side" in res:
+        cv2.imwrite(f"{out}/{stem}_side.png", draw_side(res["side"]["image"], res["side"]))
+    keep = ("label", "box", "L_mm", "W_mm", "H_mm", "H_source", "shift_px", "side_px", "fill", "tolerance", "reasons")
     blocks = [{k: (list(map(int, b[k])) if k == "box" else b.get(k)) for k in keep} for b in res["blocks"]]
     with open(f"{out}/{stem}_dims.json", "w") as f:
         json.dump(dict(status=res["status"], message=res["message"], warnings=res["warnings"], blocks=blocks), f, indent=1)
     for b in blocks:
-        print(f"  {b['label']}: L {b['L_mm']}  W {b['W_mm']}  H {b['H_mm']} ({b['H_source']}, shift {b['shift_px']})"
+        print(f"  {b['label']}: L {b['L_mm']}  W {b['W_mm']}  H {b['H_mm']} ({b['H_source']}, shift {b['shift_px']}, "
+              f"side {b['side_px']})"
               f"  {b['tolerance']} {b['reasons'] or ''}")
     for w in res["warnings"]:
         print("  WARNING:", w)
@@ -345,6 +402,30 @@ def selftest():
     assert calib_from(r) == marker_scale(scene, 40.0, {}), (calib_from(r), marker_scale(scene, 40.0, {}))
     assert abs(calib_from(r)["mm_per_px_bed"] - 0.25) < 0.01, calib_from(r)
     assert calib_from(dict(status="no_marker")) == {}
+
+    # 5. Side camera: textured front faces 250/280/300 px tall on a bright backdrop + bed, each with a light 12 px
+    #    top-face strip above it (lens above the tops). YOLO boxes include the strip and are 4 px loose at the bottom.
+    side = np.full((800, 1600, 3), 200, np.uint8)
+    side[600:] = 225
+    sboxes, true_px = [], [250, 280, 300]
+    for x1, hp in zip((100, 600, 1100), true_px):
+        side[600 - hp:600, x1:x1 + 400] = np.clip(rng.normal(95, 25, (hp, 400, 3)), 0, 255)
+        side[600 - hp - 12:600 - hp, x1 + 10:x1 + 410] = 175          # top strip, shifted (perspective)
+        sboxes.append([x1, 600 - hp - 12, x1 + 400, 604])
+    s = side_heights(side, FakeYOLO(sboxes))
+    assert s["status"] == "ok", s["status"]
+    for b, hp in zip(s["blocks"], true_px):
+        assert abs(b["h_px"] - hp) <= 2, (b["label"], b["h_px"], hp)   # strip and loose box ignored
+    assert [b["label"] for b in side_heights(side, FakeYOLO(sboxes), flip=True)["blocks"]] == ["Right", "Middle", "Left"]
+    sp = p.replace("s.csv", "side.csv")
+    np.savetxt(sp, [[x, x / 5] for x in (250, 280, 300)], delimiter=",")   # 5 px per mm
+    coef = fit_laser(sp, "side_px")
+    r = measure(img, FakeYOLO(boxes), dict(calib, side_coef=coef), side=side, side_model=FakeYOLO(sboxes))
+    assert [b["H_source"] for b in r["blocks"]] == ["side"] * 3, [b["H_source"] for b in r["blocks"]]
+    assert [round(b["H_mm"]) for b in r["blocks"]] == [50, 56, 60], [b["H_mm"] for b in r["blocks"]]
+    r = measure(img, FakeYOLO(boxes), calib, height_mm=hgt, side=side, side_model=FakeYOLO(sboxes))
+    assert r["blocks"][0]["side_px"] and r["blocks"][0]["H_mm"] is None and any("--fit_side" in w for w in r["warnings"])
+    assert draw_side(side, s).shape == side.shape
     print("selftest: ALL PASS")
 
 
@@ -354,6 +435,8 @@ def main():
     ap.add_argument("--weights", default="models/best.pt")
     ap.add_argument("--img", help="laser-OFF photo")
     ap.add_argument("--laser_on", help="same scene, laser ON (for height)")
+    ap.add_argument("--side_img", help="side-camera photo (for height); alone: print side_px per block for --fit_side")
+    ap.add_argument("--side_weights", default="models/height_detection.pt", help="side-view YOLO")
     ap.add_argument("--calib", default="calib.json")
     ap.add_argument("--save_calib", action="store_true", help="store the --scale_ref result in --calib")
     ap.add_argument("--scale_ref", type=float, help="ArUco marker black-square side in mm (measured)")
@@ -366,6 +449,7 @@ def main():
     ap.add_argument("--board", default="9x6", help="checkerboard INNER corners, cols x rows")
     ap.add_argument("--square_mm", type=float, default=25.0)
     ap.add_argument("--fit_laser", metavar="CSV")
+    ap.add_argument("--fit_side", metavar="CSV", help="rows side_px,height_mm -> side_coef in --calib")
     ap.add_argument("--make_marker", metavar="PNG")
     a = ap.parse_args()
     if a.selftest:
@@ -379,9 +463,24 @@ def main():
         return save_calib(a.calib, **calibrate_camera(a.calibrate_camera, tuple(map(int, a.board.split("x"))), a.square_mm))
     if a.fit_laser:
         return save_calib(a.calib, laser_coef=fit_laser(a.fit_laser))
+    if a.fit_side:
+        return save_calib(a.calib, side_coef=fit_laser(a.fit_side, "side_px"))
     from ultralytics import YOLO
     triple = lambda s: tuple(map(float, s.split(","))) if s else None
     calib = load_calib(a.calib)
+    side = cv2.imread(a.side_img) if a.side_img else None
+    assert a.side_img is None or side is not None, f"could not read {a.side_img}"
+    side_model = YOLO(a.side_weights) if a.side_img else None
+    if a.side_img and not a.img:   # calibration: side photo only
+        s = side_heights(side, side_model, conf=a.conf, flip=calib.get("side_flip", False))
+        os.makedirs(a.out, exist_ok=True)
+        stem = os.path.splitext(os.path.basename(a.side_img))[0]
+        cv2.imwrite(f"{a.out}/{stem}_side.png", draw_side(side, s))
+        for b in s["blocks"]:
+            H = f"  H {np.polyval(calib['side_coef'], b['h_px']):.2f} mm" if "side_coef" in calib else ""
+            print(f"  {b['label']}: side_px {b['h_px']:.1f}  (box {b['box_px']:.0f}){H}")
+        print(f"{s['status']}: {s['message'] or 'ok'} -> {a.out}/{stem}_side.png")
+        raise SystemExit(0 if s["status"] == "ok" else 1)
     kw = dict(model=YOLO(a.weights), calib=calib, scale_ref=a.scale_ref, height_mm=a.height_mm,
               nominal=triple(a.nominal), tol=triple(a.tol), conf=a.conf)
     if not a.img:
@@ -389,7 +488,7 @@ def main():
     img = cv2.imread(a.img)
     assert img is not None, f"could not read {a.img}"
     on = cv2.imread(a.laser_on) if a.laser_on else None
-    res = measure(img, laser_on=on, **kw)
+    res = measure(img, laser_on=on, side=side, side_model=side_model, **kw)
     if a.save_calib and a.scale_ref and calib_from(res):
         save_calib(a.calib, **calib_from(res))
     save(res, a.out, os.path.splitext(os.path.basename(a.img))[0])
