@@ -59,6 +59,7 @@ Three blocks are placed on the rig at a time. Then:
 | `crack_length.py` | Turns a crack mask into a length |
 | `train_block_yolov8.ipynb` | Trains the block detector (Google Colab) |
 | `crack_pretrain_unet.ipynb` | Trains the crack model (Google Colab) |
+| `evaluation/` | Compares 3 classifier designs against the thesis design constraints. Guide: [evaluation/README.md](evaluation/README.md) |
 | `marker.png` | ArUco marker to print for the mm scale |
 | `COMMANDS.md` | Setup steps and every command to run |
 

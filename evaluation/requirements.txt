@@ -1,0 +1,5 @@
+# Evaluation extras, on top of the root requirements.txt
+#   pip install -r requirements.txt -r evaluation/requirements.txt
+psutil==7.2.2        # memory_percent()
+radon==6.0.1         # Maintainability Index
+scikit-learn==1.9.1  # accuracy_score, confusion_matrix

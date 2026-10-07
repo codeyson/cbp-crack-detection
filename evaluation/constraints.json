@@ -1,0 +1,10 @@
+{
+  "_help": "Design constraints for summary and tradeoff.py. file: CSV in evaluation/results. better: lower|higher. weight: relative importance (any numbers, scaled to sum to 1).",
+  "constraints": [
+    {"name": "Reliability", "metric": "Misclassification rate (%)", "file": "evaluation.csv", "column": "misclassification_pct", "better": "lower", "weight": 1},
+    {"name": "Performance", "metric": "Average inference time (s)", "file": "evaluation.csv", "column": "inference_mean_s", "better": "lower", "weight": 1},
+    {"name": "Efficiency", "metric": "Average memory usage (%)", "file": "evaluation.csv", "column": "memory_mean_pct", "better": "lower", "weight": 1},
+    {"name": "Manufacturability", "metric": "Training time (s)", "file": "training_time.csv", "column": "training_time_s", "better": "lower", "weight": 1},
+    {"name": "Sustainability", "metric": "Maintainability Index", "file": "evaluation.csv", "column": "maintainability_index", "better": "higher", "weight": 1}
+  ]
+}

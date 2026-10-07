@@ -9,3 +9,9 @@ __pycache__/
 /blocks_out
 /dims_out
 calib.json
+/dataset
+/raw
+/evaluation/results
+/crops
+/crops_raw
+/height detection*/
