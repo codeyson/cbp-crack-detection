@@ -12,7 +12,8 @@ TAG = "models-v1"
 URL = f"https://github.com/codeyson/cbp-crack-detection/releases/download/{TAG}/"
 FILES = ["best.pt",                          # block detector (default)
          "STABLE_block_yolov8n_best.pt",     # older block detector, use with --weights
-         "unet_efficientnet-b0_best.pth"]    # crack U-Net
+         "unet_efficientnet-b0_best.pth",
+         "height_detection.pt"]    # crack U-Net
 
 os.makedirs("models", exist_ok=True)
 for name in FILES:
