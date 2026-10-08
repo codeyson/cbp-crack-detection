@@ -32,6 +32,7 @@ python crack_length.py
 python infer.py --selftest
 python dimensions.py --selftest
 python pipeline.py --selftest
+python loadcell.py --selftest
 ```
 
 Each prints `ALL PASS` (or the passing checks). Run them after any code change.
@@ -131,6 +132,32 @@ python dimensions.py --img photo.jpg --calib calib.json --nominal 200,100,60 --t
 Options: `--conf`, `--out` (default `dims_out`).
 Output: `*_dims.png` (outline, L/W/H, pass/fail) and `*_dims.json`. `bad_outline` = outline not rectangular enough, numbers not trusted.
 
+## 1.2 Weight: load cells (`firmware/loadcells/`, `loadcell.py`)
+
+One load cell per block position (Left, Middle, Right), 3x HX711, ESP32-S3, USB cable to the PC.
+Wiring and pins: top of `firmware/loadcells/loadcells.ino`.
+
+Flash the ESP32-S3 (once):
+
+1. Arduino IDE: install the "esp32" boards (Espressif) and the library "HX711" by Bogdan Necula.
+2. Open `firmware/loadcells/loadcells.ino`, board "ESP32S3 Dev Module". Using the board's native USB port: Tools -> USB CDC On Boot: Enabled.
+3. Upload. Close the Serial Monitor before running the Python commands (only one program can hold the port).
+
+Find the port: Device Manager -> Ports (COM5 etc.) on Windows, `/dev/ttyACM0` on Linux.
+
+Tare and calibrate (once, and again if a cell or platform is moved). Values are saved on the ESP32:
+
+```bash
+python loadcell.py --port COM5 --tare
+python loadcell.py --port COM5 --cal 0 --known 1000
+python loadcell.py --port COM5 --cal 1 --known 1000
+python loadcell.py --port COM5 --cal 2 --known 1000
+python loadcell.py --port COM5
+```
+
+`--tare` with all platforms empty. `--cal 0/1/2` (Left/Middle/Right) with a mass of known weight in grams on that cell only.
+The last command prints the 3 weights: check them against a kitchen scale.
+
 ## 1.3 Crack segmentation: `infer.py`
 
 Run on a block crop (e.g. from `block_detect.py`):
@@ -163,6 +190,15 @@ Live webcam with the laser instead. SPACE runs everything (laser off), then turn
 python pipeline.py --cam 0 --calib calib.json
 ```
 
+With the load cells: add `--scale COM5`. The preview shows the live weights (red = not stable yet; wait for green before SPACE).
+A "results" window shows L, W, H, weight and PASS/FAIL per block:
+
+```bash
+python pipeline.py --cam 0 --calib calib.json --scale COM5 --nominal 200,100,60 --tol 1.6,1.6,3.2 --nominal_g 2400 --tol_g 100
+```
+
+(`--nominal_g`/`--tol_g` above are example numbers: use the values from the standard.)
+
 Offline on a saved frame (same code as live):
 
 ```bash
@@ -170,8 +206,8 @@ python pipeline.py --img captures/<stamp>_raw.png
 ```
 
 Scale: `--scale_ref 50` (ArUco in frame) or `mm_per_px_bed` in `--calib`. With neither, dimensions are skipped and crack length is in px.
-Also takes `--conf` (default 0.3 here), `--edge_frac` (default 0.10), `--weights`, `--ckpt`, `--laser_on`, `--side_weights`, `--height_mm`, `--nominal`, `--tol`, `--thresh`, `--threads`, `--backbone`.
-Output: `pipeline_out/<timestamp>/` with `off.png`, `laser.png`, `side.png`, `side_overlay.png`, `overlay.png`, `<Label>_crop.png`, `<Label>_mask.png`, `summary.json` (values, warnings, per-step timings, model names). Nothing is saved unless exactly 3 blocks are found.
+Also takes `--conf` (default 0.3 here), `--edge_frac` (default 0.10), `--weights`, `--ckpt`, `--laser_on`, `--side_weights`, `--height_mm`, `--nominal`, `--tol`, `--nominal_g`, `--tol_g`, `--thresh`, `--threads`, `--backbone`.
+Output: `pipeline_out/<timestamp>/` with `off.png`, `laser.png`, `side.png`, `side_overlay.png`, `overlay.png`, `<Label>_crop.png`, `<Label>_mask.png`, `summary.json` (values incl. `weight_g`, warnings, per-step timings, model names). Nothing is saved unless exactly 3 blocks are found.
 
 ## Training (Google Colab, not on this PC)
 

@@ -109,6 +109,27 @@ def draw(res):
     return vis
 
 
+def draw_table(res):
+    """Results window: one row per block, L/W/H (mm), weight (g), PASS/FAIL. Missing values show "-"."""
+    cols = [("Block", 20), ("L (mm)", 150), ("W (mm)", 270), ("H (mm)", 390), ("Weight (g)", 510), ("Result", 680)]
+    img = np.full((70 + 50 * len(res["blocks"]), 820, 3), 255, np.uint8)
+    f = lambda v: "-" if v is None else f"{v:.1f}"
+    put = lambda t, x, y, col=(0, 0, 0): cv2.putText(img, t, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, col, 2)
+    for name, x in cols:
+        put(name, x, 40)
+    cv2.line(img, (10, 55), (810, 55), (0, 0, 0), 1)
+    for i, b in enumerate(res["blocks"]):
+        y = 95 + 50 * i
+        tol = b.get("tolerance")
+        result, col = {"pass": ("PASS", (0, 160, 0)), "fail": ("FAIL", (0, 0, 220)), None: ("-", (0, 0, 0))}.get(
+            tol, (tol, (0, 140, 255)))
+        for t, (_, x) in zip([b["label"], f(b.get("L_mm")), f(b.get("W_mm")), f(b.get("H_mm")), f(b.get("weight_g"))],
+                             cols):
+            put(t, x, y)
+        put(result, cols[-1][1], y, col)
+    return img
+
+
 def save(res, off, laser_on, out, meta):
     d = os.path.join(out, time.strftime("%Y%m%d_%H%M%S"))
     os.makedirs(d, exist_ok=True)
@@ -140,17 +161,35 @@ def save(res, off, laser_on, out, meta):
     print(f"timings {res['timings']} -> {d}")
 
 
-def run_camera(cam, out, meta, side_cam=None, **kw):
+def run_camera(cam, out, meta, side_cam=None, scale=None, **kw):
     """Preview shows the YOLO boxes. SPACE: full pipeline on the laser-OFF frame (+ side frame). L: rerun with
-    laser ON. q quits. side_cam: second camera, side view, preview shows its measured edges and height in px."""
+    laser ON. q quits. side_cam: second camera, side view, preview shows its measured edges and height in px.
+    scale: open load-cell serial port (loadcell.open_scale); preview shows the live weights, SPACE reads them."""
+    from loadcell import ScaleError, read_weights
+
+    def weigh():
+        try:
+            return read_weights(scale)
+        except ScaleError as e:
+            print("WARNING:", e)
+
+    live, last, weights = None, 0.0, None
     cap, frame = open_camera(cam)
     side_cap, side_frame = open_camera(side_cam) if side_cam is not None else (None, None)
     off, side, ok = None, None, True
     det_kw = {k: kw[k] for k in ("model", "conf")}
     fx = 1280 / frame.shape[1]
     while ok:
-        cv2.imshow("pipeline (SPACE run, L laser frame, q quit)",
-                   cv2.resize(draw_overlay(frame, detect_blocks(frame, **det_kw)), None, fx=fx, fy=fx))
+        pv = cv2.resize(draw_overlay(frame, detect_blocks(frame, **det_kw)), None, fx=fx, fy=fx)
+        if scale is not None:
+            if time.monotonic() - last > 0.5:                         # poll, not every frame
+                live, last = weigh(), time.monotonic()
+            t = "load cells: no reading" if live is None else (
+                f"L {live['Left']:.1f}  M {live['Middle']:.1f}  R {live['Right']:.1f} g  "
+                + ("stable" if live["stable"] else "NOT stable"))
+            cv2.putText(pv, t, (10, pv.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                        (0, 200, 0) if live and live["stable"] else (0, 0, 255), 2)
+        cv2.imshow("pipeline (SPACE run, L laser frame, q quit)", pv)
         if side_cap is not None:
             sv = draw_side(side_frame, side_heights(side_frame, kw["side_model"], conf=kw["conf"],
                                                     flip=kw["calib"].get("side_flip", False)))
@@ -164,13 +203,15 @@ def run_camera(cam, out, meta, side_cam=None, **kw):
             if key == ord(" "):
                 off = frame.copy()
                 side = side_frame.copy() if side_cap is not None else None
+                weights = weigh() if scale is not None else None
             on = frame.copy() if key == ord("l") else None
-            res = run(off, laser_on=on, side=side, **kw)
+            res = run(off, laser_on=on, side=side, weights=weights, **kw)
             if res["status"] == "ok":
                 save(res, off, on, out, meta)
             else:
                 print(f"not saved: {res['message']}  {res['warnings']}")
             cv2.imshow("result", cv2.resize(draw(res), None, fx=fx, fy=fx))
+            cv2.imshow("results", draw_table(res))
         ok, frame = cap.read()
         if side_cap is not None:
             ok, side_frame = side_cap.read()
@@ -203,6 +244,7 @@ def selftest():
 
     r = run(img, yolo, dark, {})                                      # no scale: px only, no dims
     assert not r["dims"] and r["blocks"][1]["crack_mm"] is None and abs(r["blocks"][1]["crack_px"] - 199) < 6
+    assert draw_table(r).shape[1] >= 600                              # no dims, no weights: dashes
     assert draw(r).shape == img.shape
 
     r = run(img, FakeYOLO(boxes[:2]), dark, {})                      # wrong count: crack model skipped
@@ -213,6 +255,8 @@ def selftest():
     assert [b["weight_g"] for b in r["blocks"]] == [1000.0, 1200.0, 990.0]
     assert r["blocks"][1]["tolerance"] == "fail" and any("weight" in s for s in r["blocks"][1]["reasons"])
     assert r["blocks"][0]["tolerance"] != "fail" and "load cells not stable" in r["warnings"]
+    t = draw_table(r)
+    assert t.ndim == 3 and t.shape[1] >= 600
     r = run(img, FakeYOLO(boxes[:2]), dark, {}, weights=w)            # wrong count: no crash
     assert r["status"] == "wrong_count"
 
@@ -265,6 +309,9 @@ def main():
     ap.add_argument("--edge_frac", type=float, default=0.10, help="ignore this fraction of each box side (walls, shadows)")
     ap.add_argument("--threads", type=int, default=0, help="CPU threads (0 = library default)")
     ap.add_argument("--out", default="pipeline_out")
+    ap.add_argument("--scale", help="load-cell ESP32 serial port, e.g. COM5 (weight per block)")
+    ap.add_argument("--nominal_g", type=float, help="block weight from the standard, g")
+    ap.add_argument("--tol_g", type=float, help="weight tolerance, g")
     a = ap.parse_args()
     if a.selftest:
         return selftest()
@@ -272,18 +319,26 @@ def main():
     for p in (a.weights, a.ckpt) + ((a.side_weights,) if use_side else ()):
         if not os.path.exists(p):
             ap.error(f"{p} not found: run  python download_models.py")
+    scale = None
+    if a.scale:
+        from loadcell import ScaleError, open_scale, read_weights
+        try:
+            scale = open_scale(a.scale)
+        except ScaleError as e:
+            ap.error(str(e))
     from ultralytics import YOLO
     from infer import load_predict_fn
     fn, device = load_predict_fn(a.ckpt, a.backbone, a.threads)
     triple = lambda s: tuple(map(float, s.split(","))) if s else None
     kw = dict(model=YOLO(a.weights), predict_fn=fn, calib=load_calib(a.calib), scale_ref=a.scale_ref,
               height_mm=a.height_mm, nominal=triple(a.nominal), tol=triple(a.tol), thresh=a.thresh,
-              conf=a.conf, edge_frac=a.edge_frac, side_model=YOLO(a.side_weights) if use_side else None)
+              conf=a.conf, edge_frac=a.edge_frac, side_model=YOLO(a.side_weights) if use_side else None,
+              nominal_g=a.nominal_g, tol_g=a.tol_g)
     meta = dict(weights=os.path.basename(a.weights), ckpt=os.path.basename(a.ckpt), backbone=a.backbone,
                 thresh=a.thresh, edge_frac=a.edge_frac, device=device,
                 **({"side_weights": os.path.basename(a.side_weights)} if use_side else {}))
     if a.cam is not None:
-        return run_camera(a.cam, a.out, meta, side_cam=a.side_cam, **kw)
+        return run_camera(a.cam, a.out, meta, side_cam=a.side_cam, scale=scale, **kw)
     if not a.img:
         ap.error("--img or --cam is required")
     off = cv2.imread(a.img)
@@ -291,7 +346,13 @@ def main():
     on = cv2.imread(a.laser_on) if a.laser_on else None
     side = cv2.imread(a.side_img) if a.side_img else None
     assert a.side_img is None or side is not None, f"could not read {a.side_img}"
-    res = run(off, laser_on=on, side=side, **kw)
+    weights = None
+    if scale is not None:
+        try:
+            weights = read_weights(scale)
+        except ScaleError as e:
+            print("WARNING:", e)
+    res = run(off, laser_on=on, side=side, weights=weights, **kw)
     if res["status"] != "ok":
         print(f"{res['status']}: {res['message']}  {res['warnings']}")
         raise SystemExit(1)
