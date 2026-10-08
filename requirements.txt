@@ -9,3 +9,4 @@ scikit-image==0.26.0
 opencv-python==5.0.0.93     # GUI build: the webcam preview needs cv2.imshow. Never install -headless next to it.
 segmentation-models-pytorch==0.5.0
 ultralytics==8.4.173
+pyserial==3.5             # load cells (ESP32-S3 over USB serial)
