@@ -28,9 +28,10 @@ from infer import predict_tiled
 
 
 def run(off, model, predict_fn, calib, laser_on=None, scale_ref=None, height_mm=None, nominal=None, tol=None,
-        thresh=0.5, side=None, side_model=None, **det_kw):
+        thresh=0.5, side=None, side_model=None, weights=None, nominal_g=None, tol_g=None, **det_kw):
     """off = laser-OFF frame (BGR). Returns measure()-style dict + per-block crack fields, "dims", "timings".
-    Crack model only runs when status == "ok"."""
+    weights: loadcell.read_weights() dict, read at capture time -> weight_g per block, tolerance fail when
+    |weight_g - nominal_g| > tol_g. Crack model only runs when status == "ok"."""
     t0 = time.perf_counter()
     res = dict(status="no_scale")
     if scale_ref or "mm_per_px_bed" in calib:
@@ -45,6 +46,8 @@ def run(off, model, predict_fn, calib, laser_on=None, scale_ref=None, height_mm=
         if side is not None:                                          # height needs no top-view scale
             res["warnings"] += side_height(res, side, side_model, calib, det_kw.get("conf", 0.5))
     res["timings"] = {"detect_dims_s": round(time.perf_counter() - t0, 3)}
+    if weights:
+        add_weights(res, weights, nominal_g, tol_g)
     if res["status"] != "ok":
         return res
 
@@ -64,6 +67,21 @@ def run(off, model, predict_fn, calib, laser_on=None, scale_ref=None, height_mm=
     if res["dims"] and not all(Z and (b.get("H_mm") or height_mm) for b in res["blocks"]):
         res["warnings"].append("crack mm uses the bed scale (no camera height or block height): reads too long")
     return res
+
+
+def add_weights(res, weights, nominal_g=None, tol_g=None):
+    """weight_g per block by label. A weight pass never overrides an L/W/H fail."""
+    if not weights["stable"]:
+        res.setdefault("warnings", []).append("load cells not stable")
+    for b in res["blocks"]:
+        w = b["weight_g"] = weights.get(b["label"])
+        if w is None or nominal_g is None or tol_g is None:
+            continue
+        if abs(w - nominal_g) > tol_g:
+            b["tolerance"] = "fail"
+            b["reasons"] = (b.get("reasons") or []) + [f"weight {w:.0f} g vs {nominal_g:g} +/- {tol_g:g}"]
+        elif b.get("tolerance") in (None, "no_standard"):
+            b["tolerance"] = "pass"
 
 
 def draw(res):
@@ -102,7 +120,7 @@ def save(res, off, laser_on, out, meta):
         cv2.imwrite(f"{d}/side_overlay.png", draw_side(res["side"]["image"], res["side"]))
     cv2.imwrite(f"{d}/overlay.png", draw(res))
     keep = ("label", "L_mm", "W_mm", "H_mm", "H_source", "shift_px", "side_px", "fill", "tolerance", "reasons",
-            "crack_mm", "crack_px", "crack_pieces", "crack_mm_per_px")
+            "crack_mm", "crack_px", "crack_pieces", "crack_mm_per_px", "weight_g")
     blocks = []
     for b in res["blocks"]:
         cv2.imwrite(f"{d}/{b['label']}_crop.png", b["crop"])
@@ -113,7 +131,8 @@ def save(res, off, laser_on, out, meta):
                        timings=res["timings"], blocks=blocks), f, indent=1, default=float)
     for b in blocks:
         side = f" (side {b['side_px']:.1f} px)" if b["side_px"] is not None else ""
-        print(f"  {b['label']}: L {b['L_mm']}  W {b['W_mm']}  H {b['H_mm']}{side}  {b['tolerance']}  "
+        wt = f"  {b['weight_g']} g" if b["weight_g"] is not None else ""
+        print(f"  {b['label']}: L {b['L_mm']}  W {b['W_mm']}  H {b['H_mm']}{side}{wt}  {b['tolerance']}  "
               f"crack {b['crack_mm'] if b['crack_mm'] is not None else str(round(b['crack_px'])) + ' px'}"
               f" ({b['crack_pieces']} pcs)")
     for w in res["warnings"]:
@@ -189,6 +208,14 @@ def selftest():
     r = run(img, FakeYOLO(boxes[:2]), dark, {})                      # wrong count: crack model skipped
     assert r["status"] == "wrong_count" and "crack_px" not in r["blocks"][0]
 
+    w = {"Left": 1000.0, "Middle": 1200.0, "Right": 990.0, "stable": False}
+    r = run(img, yolo, dark, dict(mm_per_px_bed=0.5), weights=w, nominal_g=1000, tol_g=50)
+    assert [b["weight_g"] for b in r["blocks"]] == [1000.0, 1200.0, 990.0]
+    assert r["blocks"][1]["tolerance"] == "fail" and any("weight" in s for s in r["blocks"][1]["reasons"])
+    assert r["blocks"][0]["tolerance"] != "fail" and "load cells not stable" in r["warnings"]
+    r = run(img, FakeYOLO(boxes[:2]), dark, {}, weights=w)            # wrong count: no crash
+    assert r["status"] == "wrong_count"
+
     side = np.full((800, 1600, 3), 200, np.uint8)                     # side view: faces 250 px tall
     sboxes = [[x, 350, x + 400, 600] for x in (100, 600, 1100)]
     for x1, _, x2, _ in sboxes:
@@ -211,6 +238,7 @@ def selftest():
     with open(f"{d}/summary.json") as f:
         saved = json.load(f)["blocks"]
     assert all(abs(b["side_px"] - 250) < 3 for b in saved), saved
+    assert "weight_g" in saved[0]
     assert os.path.exists(f"{d}/side.png") and os.path.exists(f"{d}/side_overlay.png")
     print("selftest: ALL PASS")
 
