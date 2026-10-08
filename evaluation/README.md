@@ -69,11 +69,7 @@ Run all commands from the repo folder, with the venv active.
    python evaluation/evaluate.py --selftest
    ```
 
-3. Get the Maintainability Index. This is already the final value:
-
-   ```bash
-   python evaluation/evaluate.py --mi
-   ```
+3. The Maintainability Index needs no separate step: every `evaluate.py` run records it in `maintainability_index`, and it is already the final value.
 
 4. Get provisional inference time and memory. These use real block crops at 224 px with untrained models; speed and memory depend on the model's size, not on what it learned.
    - Put real crops in a folder named `crops`: copy only the `*_crop.png` files from `captures`, because that folder also holds raw frames and overlays.

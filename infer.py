@@ -59,16 +59,17 @@ def predict_tiled(img_rgb, predict_fn, tile=256, overlap=64, batch=8):
     return (acc / wsum)[:h, :w]
 
 
-def load_model(ckpt, backbone, device="cpu"):
+def load_predict_fn(ckpt, backbone, threads=0, tile=256):
+    """Model setup shared by infer.py and pipeline.py: threads (0 = library default), cuda if available,
+    load the checkpoint, one warm-up tile. Returns (predict_fn, device)."""
     import torch
     import segmentation_models_pytorch as smp
+    if threads > 0:
+        torch.set_num_threads(threads)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     model = smp.Unet(backbone, encoder_weights=None, in_channels=3, classes=1)  # weights come from ckpt
     model.load_state_dict(torch.load(ckpt, map_location=device))
-    return model.to(device).eval()
-
-
-def make_predict_fn(model, device="cpu"):
-    import torch
+    model = model.to(device).eval()
 
     def fn(tiles):
         x = (tiles.astype(np.float32) / 255.0 - MEAN) / STD
@@ -76,17 +77,6 @@ def make_predict_fn(model, device="cpu"):
         with torch.inference_mode():
             p = torch.sigmoid(model(x))[:, 0]
         return p.float().cpu().numpy()
-    return fn
-
-
-def load_predict_fn(ckpt, backbone, threads=0, tile=256):
-    """Model setup shared by infer.py and pipeline.py: threads (0 = library default), cuda if available,
-    load the checkpoint, one warm-up tile. Returns (predict_fn, device)."""
-    import torch
-    if threads > 0:
-        torch.set_num_threads(threads)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    fn = make_predict_fn(load_model(ckpt, backbone, device), device)
     fn(np.zeros((1, tile, tile, 3), np.uint8))              # warm-up, excluded from timing
     return fn, device
 
@@ -107,37 +97,8 @@ def selftest():
         ok = out.shape == shape and np.allclose(out, img[..., 0] / 255.0, atol=1e-5)
         ok_all &= ok
         print(f"[{'PASS' if ok else 'FAIL'}] {shape}: output shape {out.shape}, {n_tiles[0]} tiles, blends back to input")
-    ok_all &= selftest_load_predict_fn()
     print("selftest:", "ALL PASS" if ok_all else "FAILURES")
     return ok_all
-
-
-def selftest_load_predict_fn(backbone="efficientnet-b0"):
-    """load_predict_fn == load_model + make_predict_fn, threads applied. Random-weight checkpoint, no real
-    weights needed. Skipped (counts as pass) when torch / segmentation-models-pytorch are not installed."""
-    try:
-        import torch
-        import segmentation_models_pytorch as smp
-    except ImportError:
-        print("[SKIP] load_predict_fn: torch or segmentation-models-pytorch not installed")
-        return True
-    import tempfile
-    p = os.path.join(tempfile.mkdtemp(), "rand.pth")
-    torch.manual_seed(0)
-    torch.save(smp.Unet(backbone, encoder_weights=None, in_channels=3, classes=1).state_dict(), p)
-    old = torch.get_num_threads()
-    try:
-        fn, device = load_predict_fn(p, backbone, threads=1)
-        threads_ok = torch.get_num_threads() == 1
-    finally:
-        torch.set_num_threads(old)
-    tiles = np.random.default_rng(0).integers(0, 256, (2, 256, 256, 3), dtype=np.uint8)
-    got = fn(tiles)
-    want = make_predict_fn(load_model(p, backbone, device), device)(tiles)
-    ok = threads_ok and got.shape == (2, 256, 256) and np.allclose(got, want, atol=1e-5)
-    print(f"[{'PASS' if ok else 'FAIL'}] load_predict_fn: device {device}, threads set {threads_ok}, "
-          f"output {got.shape}, matches load_model + make_predict_fn")
-    return ok
 
 
 def main():

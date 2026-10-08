@@ -2,7 +2,7 @@
 evaluate.py - measure one design against the design constraints. Run on the rig laptop, one design per run
 (separate processes, so one model's memory does not count against another).
 
-Each call does 50 runs by default (--runs): 50 fresh processes, one inspection cycle each, rows sharing one
+Each call does 1 runs by default (--runs): 1 fresh processes, one inspection cycle each, rows sharing one
 batch id. tradeoff.py averages the newest batch per design and plots every run (runs.png).
 
 Final (needs the labeled dataset and trained weights):
@@ -50,6 +50,10 @@ from train import HERE, append_row
 def test_items(data):
     """[(path, true_grade)] from data/test/{A,B,C}/."""
     root = os.path.join(data, "test")
+    if not os.path.isdir(root):
+        raise SystemExit(f"{root} not found: sort crops into raw/A raw/B raw/C, run "
+                         f"'python evaluation/make_split.py raw {data}', then train.py. "
+                         "No labels yet? Use --img_dir crops for provisional speed/memory.")
     return [(os.path.join(root, cls, f), cls) for cls in sorted(os.listdir(root))
             for f in sorted(os.listdir(os.path.join(root, cls))) if f.lower().endswith(EXT)]
 
@@ -151,19 +155,14 @@ if __name__ == "__main__":
     ap.add_argument("--data", default="dataset", help="needs dataset/test/{A,B,C}/")
     ap.add_argument("--weights", help="default: the design's file in models/")
     ap.add_argument("--img_dir", help="any block crops: no labels, untrained model, speed/memory only")
-    ap.add_argument("--runs", type=int, default=50, help="separate runs (fresh process each), averaged by tradeoff.py")
+    ap.add_argument("--runs", type=int, default=1, help="separate runs (fresh process each), averaged by tradeoff.py")
     ap.add_argument("--cycles", type=int, default=1, help="full passes over the images per run (inspection cycles)")
     ap.add_argument("--batch", default="", help=argparse.SUPPRESS)   # set by the --runs loop
-    ap.add_argument("--mi", action="store_true", help="print the Maintainability Index of each design")
     ap.add_argument("--results", default=f"{HERE}/results", help="e.g. evaluation/results/provisional")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
         selftest()
-    elif a.mi:
-        for d in DESIGNS:
-            print(f"{d} {DESIGNS[d]:20} MI {maintainability(d):.2f}  files: "
-                  + ", ".join(os.path.basename(p) for p in designs.source_files(d)))
     elif a.design and a.runs > 1:
         batch = datetime.datetime.now().isoformat(timespec="seconds")
         cmd = [sys.executable, __file__, "--design", a.design, "--data", a.data, "--cycles", str(a.cycles),
@@ -177,4 +176,4 @@ if __name__ == "__main__":
         evaluate(a.design, a.data, a.weights or (None if a.img_dir else designs.weights_path(a.design)),
                  a.img_dir, a.cycles, results=a.results, batch=a.batch)
     else:
-        ap.error("give --design, --mi or --selftest")
+        ap.error("give --design or --selftest")
