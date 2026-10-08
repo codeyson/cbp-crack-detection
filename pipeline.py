@@ -23,7 +23,7 @@ import numpy as np
 
 from block_detect import detect_blocks, draw_overlay, open_camera
 from crack_length import crack_length_mm
-from dimensions import draw as draw_dims, draw_side, load_calib, measure, side_heights, undistort
+from dimensions import draw as draw_dims, draw_side, load_calib, measure, side_height, side_heights, undistort
 from infer import predict_tiled
 
 
@@ -41,8 +41,9 @@ def run(off, model, predict_fn, calib, laser_on=None, scale_ref=None, height_mm=
         why = "ArUco marker not found" if res["status"] == "no_marker" else "no scale"
         img = undistort(off, calib)
         res = dict(detect_blocks(img, model, **det_kw), image=img, dims=False,
-                   warnings=[f"{why}: dimensions skipped, crack length in px only"]
-                   + (["side camera not used: height needs the dimensions scale"] if side is not None else []))
+                   warnings=[f"{why}: dimensions skipped, crack length in px only"])
+        if side is not None:                                          # height needs no top-view scale
+            res["warnings"] += side_height(res, side, side_model, calib, det_kw.get("conf", 0.5))
     res["timings"] = {"detect_dims_s": round(time.perf_counter() - t0, 3)}
     if res["status"] != "ok":
         return res
@@ -76,9 +77,16 @@ def draw(res):
     th = max(2, round(s * 2))
     row = 4 if res["dims"] else 1                                     # below the text the draw function wrote
     for b in res["blocks"]:
+        lines = []
         if "crack_px" in b:
             t = f"crack {b['crack_mm']:.1f} mm" if b["crack_mm"] is not None else f"crack {b['crack_px']:.0f} px"
-            cv2.putText(vis, f"{t} ({b['crack_pieces']} pcs)", (b["box"][0] + 10, b["box"][1] + int((40 + 35 * row) * s)),
+            lines.append(f"{t} ({b['crack_pieces']} pcs)")
+        if b.get("H_mm") is not None and not res["dims"]:            # dims mode already shows H
+            lines.append(f"H {b['H_mm']:.1f} mm")
+        elif b.get("H_mm") is None and b.get("side_px") is not None:  # side camera not calibrated yet
+            lines.append(f"side {b['side_px']:.1f} px")
+        for i, t in enumerate(lines):
+            cv2.putText(vis, t, (b["box"][0] + 10, b["box"][1] + int((40 + 35 * (row + i)) * s)),
                         cv2.FONT_HERSHEY_SIMPLEX, s, (0, 0, 255), th)
     return vis
 
@@ -104,7 +112,8 @@ def save(res, off, laser_on, out, meta):
         json.dump(dict(meta, status=res["status"], message=res["message"], warnings=res["warnings"],
                        timings=res["timings"], blocks=blocks), f, indent=1, default=float)
     for b in blocks:
-        print(f"  {b['label']}: L {b['L_mm']}  W {b['W_mm']}  H {b['H_mm']}  {b['tolerance']}  "
+        side = f" (side {b['side_px']:.1f} px)" if b["side_px"] is not None else ""
+        print(f"  {b['label']}: L {b['L_mm']}  W {b['W_mm']}  H {b['H_mm']}{side}  {b['tolerance']}  "
               f"crack {b['crack_mm'] if b['crack_mm'] is not None else str(round(b['crack_px'])) + ' px'}"
               f" ({b['crack_pieces']} pcs)")
     for w in res["warnings"]:
@@ -187,6 +196,22 @@ def selftest():
     r = run(img, yolo, dark, dict(mm_per_px_bed=0.5, side_coef=[0.2, 0.0]), side=side, side_model=FakeYOLO(sboxes))
     assert [b["H_source"] for b in r["blocks"]] == ["side"] * 3 and all(abs(b["H_mm"] - 50) < 0.5 for b in r["blocks"])
     assert "side" in r and draw(r).shape == img.shape
+
+    r = run(img, yolo, dark, dict(side_coef=[0.2, 0.0]), side=side, side_model=FakeYOLO(sboxes))   # no top scale
+    assert not r["dims"] and "side" in r, r["warnings"]
+    assert all(b["H_source"] == "side" and abs(b["H_mm"] - 50) < 0.5 for b in r["blocks"]), [b.get("H_mm") for b in r["blocks"]]
+    r = run(img, yolo, dark, {}, side=side, side_model=FakeYOLO(sboxes))                             # side not calibrated
+    assert all(b.get("H_mm") is None and abs(b["side_px"] - 250) < 3 for b in r["blocks"])
+    assert draw(r).shape == img.shape
+
+    import tempfile                                                   # what is saved after a capture
+    d = tempfile.mkdtemp()
+    save(r, img, None, d, {})
+    d = os.path.join(d, os.listdir(d)[0])
+    with open(f"{d}/summary.json") as f:
+        saved = json.load(f)["blocks"]
+    assert all(abs(b["side_px"] - 250) < 3 for b in saved), saved
+    assert os.path.exists(f"{d}/side.png") and os.path.exists(f"{d}/side_overlay.png")
     print("selftest: ALL PASS")
 
 
@@ -227,7 +252,8 @@ def main():
               height_mm=a.height_mm, nominal=triple(a.nominal), tol=triple(a.tol), thresh=a.thresh,
               conf=a.conf, edge_frac=a.edge_frac, side_model=YOLO(a.side_weights) if use_side else None)
     meta = dict(weights=os.path.basename(a.weights), ckpt=os.path.basename(a.ckpt), backbone=a.backbone,
-                thresh=a.thresh, edge_frac=a.edge_frac, device=device)
+                thresh=a.thresh, edge_frac=a.edge_frac, device=device,
+                **({"side_weights": os.path.basename(a.side_weights)} if use_side else {}))
     if a.cam is not None:
         return run_camera(a.cam, a.out, meta, side_cam=a.side_cam, **kw)
     if not a.img:

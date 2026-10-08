@@ -228,6 +228,24 @@ def draw_side(img, res):
     return vis
 
 
+def side_height(res, side, side_model, calib, conf=0.5):
+    """Side-camera height onto res["blocks"], matched by label: side_px, plus H_mm / H_source="side" when side_coef
+    is calibrated (--fit_side). Sets res["side"]. Needs no top-view mm scale. Returns warnings."""
+    res["side"] = side_heights(side, side_model, conf=conf, flip=calib.get("side_flip", False))
+    warn, px = [], {}
+    if res["side"]["status"] != "ok":
+        warn.append(f"side camera: {res['side']['message']} Side height not measured.")
+    else:
+        px = {s["label"]: s["h_px"] for s in res["side"]["blocks"]}
+    if "side_coef" not in calib:
+        warn.append("side camera not calibrated (--fit_side): height not measured, side_px only")
+    for b in res["blocks"]:
+        b["side_px"] = px.get(b["label"])
+        if b["side_px"] is not None and "side_coef" in calib:
+            b.update(H_mm=float(np.polyval(calib["side_coef"], b["side_px"])), H_source="side")
+    return warn
+
+
 # ------------------------------------------------------------------------------------------- pipeline
 def calib_from(res):
     """Scale values measure() used, for --save_calib ({} when the marker was not found)."""
@@ -263,25 +281,17 @@ def measure(img, model, calib, scale_ref=None, laser_on=None, height_mm=None, no
         shifts = laser_shifts(laser_line(undistort(laser_on, calib), img), [b["box"] for b in res["blocks"]])
         if "laser_coef" not in sc:
             warn.append("laser not calibrated (--fit_laser): height not measured, shift_px only")
-    side_px = {}
     if side is not None:
-        res["side"] = side_heights(side, side_model, conf=det_kw.get("conf", 0.5), flip=sc.get("side_flip", False))
-        if res["side"]["status"] != "ok":
-            warn.append(f"side camera: {res['side']['message']} Side height not measured.")
-        else:
-            side_px = {s["label"]: s["h_px"] for s in res["side"]["blocks"]}
-        if "side_coef" not in sc:
-            warn.append("side camera not calibrated (--fit_side): height not measured, side_px only")
+        warn += side_height(res, side, side_model, sc, det_kw.get("conf", 0.5))
     if not sc.get("cam_height_mm"):
         warn.append("camera height unknown: no side-wall/height correction, L/W read too large")
     cxy = (np.array(sc["K"])[:2, 2] if "K" in sc else np.array(img.shape[1::-1]) / 2)
     for b, sh in zip(res["blocks"], shifts):
-        H = float(np.polyval(sc["laser_coef"], sh)) if sh is not None and "laser_coef" in sc else None
-        src = "laser" if H is not None else "not measured"
-        px = side_px.get(b["label"])
-        if px is not None and "side_coef" in sc:
-            H, src = float(np.polyval(sc["side_coef"], px)), "side"
-        b.update(shift_px=sh, side_px=px, H_mm=H, H_source=src)
+        H, src = b.get("H_mm"), b.get("H_source")      # side camera (when calibrated) wins over the laser
+        if H is None:
+            H = float(np.polyval(sc["laser_coef"], sh)) if sh is not None and "laser_coef" in sc else None
+            src = "laser" if H is not None else "not measured"
+        b.update(shift_px=sh, H_mm=H, H_source=src)
         out = outline_rect(img, b["box"])
         if out is None:
             b.update(L_mm=None, W_mm=None, tolerance="no_outline", reasons=["outline not found"])
