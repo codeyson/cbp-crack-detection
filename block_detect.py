@@ -2,9 +2,9 @@
 block_detect.py - find the 3 blocks in one rig photo with the trained YOLO model, label them Left/Middle/Right
 and crop each one for the crack model (objective 1.1). Model: train_block_yolov8.ipynb.
 
-Webcam:     python block_detect.py --cam 0 --weights models/block_yolov8n_best.pt --conf 0.3 --out captures
-One photo:  python block_detect.py --img rig.jpg --weights models/block_yolov8n_best.pt
-Evaluate:   python block_detect.py --yolo_dir "CBP Block Detection.v3i.yolov8" --weights models/block_yolov8n_best.pt
+Webcam:     python block_detect.py --cam 0 --conf 0.3 --out captures
+One photo:  python block_detect.py --img rig.jpg
+Evaluate:   python block_detect.py --yolo_dir "CBP Block Detection.v3i.yolov8"
 Self-test:  python block_detect.py --selftest
 
 In the pipeline:
@@ -25,10 +25,12 @@ import cv2
 import numpy as np
 
 
-def detect_blocks(img, model, n_expected=3, conf=0.5, erode_px=6):
+def detect_blocks(img, model, n_expected=3, conf=0.5, erode_px=6, edge_frac=0.10):
     """Returns {"status", "message", "blocks"}. ALWAYS check status == "ok" before using blocks.
     status: ok | wrong_count | touches_border. Each block: label, box (x1, y1, x2, y2), crop, interior, touches_border.
-    erode_px: interior mask is the box shrunk by this much, to keep block edges out of the crack measurement."""
+    interior: the box shrunk on each side by max(erode_px, edge_frac * box side), so side walls, bevels and
+    shadows along the edges stay out of the crack measurement. Cracks inside that edge strip are not measured.
+    ponytail: fixed fraction of the box; exact top-face polygon (needs camera height) if the strip loses real cracks."""
     H, W = img.shape[:2]
     boxes = np.asarray(model.predict(img, conf=conf, verbose=False)[0].boxes.xyxy.cpu()).round().astype(int)
     boxes = sorted((tuple(np.clip(b, 0, [W, H, W, H])) for b in boxes), key=lambda b: b[0])  # left to right
@@ -36,7 +38,8 @@ def detect_blocks(img, model, n_expected=3, conf=0.5, erode_px=6):
     blocks = []
     for name, (x1, y1, x2, y2) in zip(names, boxes):
         interior = np.zeros((y2 - y1, x2 - x1), bool)
-        interior[erode_px:-erode_px or None, erode_px:-erode_px or None] = True
+        ex, ey = max(erode_px, int(edge_frac * (x2 - x1))), max(erode_px, int(edge_frac * (y2 - y1)))
+        interior[ey:-ey or None, ex:-ex or None] = True
         blocks.append(dict(label=name, box=(x1, y1, x2, y2), crop=img[y1:y2, x1:x2].copy(), interior=interior,
                            touches_border=x1 <= 1 or y1 <= 1 or x2 >= W - 1 or y2 >= H - 1))
     res = dict(status="ok", message="", blocks=blocks)
@@ -65,7 +68,6 @@ def save(img, res, out, stem):
     cv2.imwrite(f"{out}/{stem}_overlay.png", draw_overlay(img, res))
     for b in res["blocks"]:
         cv2.imwrite(f"{out}/{stem}_{b['label']}_crop.png", b["crop"])
-        cv2.imwrite(f"{out}/{stem}_{b['label']}_interior.png", b["interior"].astype(np.uint8) * 255)
     with open(f"{out}/{stem}_summary.json", "w") as f:
         json.dump(dict(status=res["status"], message=res["message"],
                        blocks=[dict(label=b["label"], box=[int(v) for v in b["box"]]) for b in res["blocks"]]), f, indent=1)
@@ -141,21 +143,24 @@ def evaluate_yolo_dir(root, iou_ok=0.8, **kw):
     return passed, len(paths)
 
 
+class FakeYOLO:
+    """Self-test stand-in for ultralytics YOLO: mimics model.predict(...)[0].boxes.xyxy.cpu()."""
+    def __init__(self, boxes): self.boxes = np.array(boxes, np.float32)
+    def predict(self, img, conf, verbose):
+        from types import SimpleNamespace as NS
+        return [NS(boxes=NS(xyxy=NS(cpu=lambda: self.boxes)))]
+
+
 def selftest():
-    from types import SimpleNamespace as NS
-
-    class FakeYOLO:                                                  # mimics model.predict(...)[0].boxes.xyxy.cpu()
-        def __init__(self, boxes): self.boxes = np.array(boxes, np.float32)
-        def predict(self, img, conf, verbose):
-            return [NS(boxes=NS(xyxy=NS(cpu=lambda: self.boxes)))]
-
     img = np.zeros((900, 1600, 3), np.uint8)
     row = [[1150, 375, 1450, 525], [150, 375, 450, 525], [650, 375, 950, 525]]   # out of order on purpose
     r = detect_blocks(img, FakeYOLO(row))
     assert r["status"] == "ok", r
     assert [b["label"] for b in r["blocks"]] == ["Left", "Middle", "Right"]
     assert all(b["crop"].shape == (150, 300, 3) for b in r["blocks"])
-    assert r["blocks"][0]["interior"].sum() == (150 - 12) * (300 - 12)          # shrunk 6 px on every side
+    assert r["blocks"][0]["interior"].sum() == (150 - 30) * (300 - 60)          # shrunk 10% of each side
+    r = detect_blocks(img, FakeYOLO(row), edge_frac=0)
+    assert r["blocks"][0]["interior"].sum() == (150 - 12) * (300 - 12)          # edge_frac 0: 6 px on every side
     assert detect_blocks(img, FakeYOLO(row[:2]))["status"] == "wrong_count"
     assert detect_blocks(img, FakeYOLO(row[:2] + [[0, 375, 100, 525]]))["status"] == "touches_border"
     assert iou((0, 0, 10, 10), (0, 0, 10, 10)) == 1 and iou((0, 0, 10, 10), (20, 20, 30, 30)) == 0
@@ -165,21 +170,19 @@ def selftest():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
-    ap.add_argument("--weights", help="trained YOLO block detector, e.g. models/block_yolov8n_best.pt")
+    ap.add_argument("--weights", default="models/best.pt", help="trained YOLO block detector")
     ap.add_argument("--cam", type=int, help="webcam index for live mode, e.g. 0")
     ap.add_argument("--img")
     ap.add_argument("--yolo_dir", help="Roboflow YOLOv8 export: compare detections to the annotated boxes")
     ap.add_argument("--out", default="blocks_out")
     ap.add_argument("--conf", type=float, default=0.5, help="YOLO confidence threshold")
-    ap.add_argument("--n", type=int, default=3)
     ap.add_argument("--erode_px", type=int, default=6)
+    ap.add_argument("--edge_frac", type=float, default=0.10, help="interior shrink per side, fraction of the box")
     a = ap.parse_args()
     if a.selftest:
         return selftest()
-    if not a.weights:
-        ap.error("--weights is required")
     from ultralytics import YOLO
-    kw = dict(model=YOLO(a.weights), n_expected=a.n, conf=a.conf, erode_px=a.erode_px)
+    kw = dict(model=YOLO(a.weights), conf=a.conf, erode_px=a.erode_px, edge_frac=a.edge_frac)
     if a.yolo_dir:
         passed, total = evaluate_yolo_dir(a.yolo_dir, **kw)
         raise SystemExit(0 if total and passed == total else 1)

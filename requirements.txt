@@ -1,18 +1,11 @@
-# Inference-only requirements (training happens in Colab and is NOT listed here).
-#
-# 1) Install torch + torchvision FIRST, CPU build, using the command for your OS from https://pytorch.org
-#    (a plain "pip install torch" on Linux may download a large GPU build).
-# 2) Then:  pip install -r requirements.txt
-#
-numpy
-scipy
-scikit-image
-opencv-python               # GUI build: the webcam preview needs cv2.imshow. Never install -headless next to it.
-segmentation-models-pytorch # TODO: pin with == to the version used in Colab
-timm                        # TODO: pin with == to the version used in Colab
-ultralytics                 # block detector (YOLOv8). TODO: pin to the version printed by train_block_yolov8.ipynb
-#
-# Print the Colab versions with:
-#   import sys, torch, torchvision, segmentation_models_pytorch as smp, timm, numpy, scipy, skimage, cv2
-#   print(sys.version)
-#   for m in (torch, torchvision, smp, timm, numpy, scipy, skimage, cv2): print(m.__name__, m.__version__)
+# Inference only (training runs in Colab). Tested with Python 3.11 on Windows, CPU.
+#   pip install -r requirements.txt
+# Linux: plain pip pulls a large CUDA torch. For CPU only, install torch/torchvision first from https://pytorch.org
+torch==2.14.1
+torchvision==0.29.1
+numpy==2.4.6
+scipy==1.17.1
+scikit-image==0.26.0
+opencv-python==5.0.0.93     # GUI build: the webcam preview needs cv2.imshow. Never install -headless next to it.
+segmentation-models-pytorch==0.5.0
+ultralytics==8.4.173

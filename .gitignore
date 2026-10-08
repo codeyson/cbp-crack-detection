@@ -3,4 +3,15 @@
 /CBP Block Detection*/
 /captures
 PROJECT_STATE_1.1.md
-/__pycache__
+__pycache__/
+/results
+/pipeline_out
+/blocks_out
+/dims_out
+calib.json
+/dataset
+/raw
+/evaluation/results
+/crops
+/crops_raw
+/height detection*/
