@@ -70,7 +70,7 @@ def run(off, model, predict_fn, calib, laser_on=None, scale_ref=None, height_mm=
 
 
 def add_weights(res, weights, nominal_g=None, tol_g=None):
-    """weight_g per block by label. A weight pass never overrides an L/W/H fail."""
+    """weight_g per block by label. Weight can only set "fail": a weight pass never upgrades the L/W/H status."""
     if not weights["stable"]:
         res.setdefault("warnings", []).append("load cells not stable")
     for b in res["blocks"]:
@@ -80,8 +80,6 @@ def add_weights(res, weights, nominal_g=None, tol_g=None):
         if abs(w - nominal_g) > tol_g:
             b["tolerance"] = "fail"
             b["reasons"] = (b.get("reasons") or []) + [f"weight {w:.0f} g vs {nominal_g:g} +/- {tol_g:g}"]
-        elif b.get("tolerance") in (None, "no_standard"):
-            b["tolerance"] = "pass"
 
 
 def draw(res):
@@ -254,7 +252,7 @@ def selftest():
     r = run(img, yolo, dark, dict(mm_per_px_bed=0.5), weights=w, nominal_g=1000, tol_g=50)
     assert [b["weight_g"] for b in r["blocks"]] == [1000.0, 1200.0, 990.0]
     assert r["blocks"][1]["tolerance"] == "fail" and any("weight" in s for s in r["blocks"][1]["reasons"])
-    assert r["blocks"][0]["tolerance"] != "fail" and "load cells not stable" in r["warnings"]
+    assert r["blocks"][0]["tolerance"] == "no_standard" and "load cells not stable" in r["warnings"]   # no L/W/H standard: weight pass is not PASS
     t = draw_table(r)
     assert t.ndim == 3 and t.shape[1] >= 600
     r = run(img, FakeYOLO(boxes[:2]), dark, {}, weights=w)            # wrong count: no crash
