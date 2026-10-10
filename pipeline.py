@@ -1,14 +1,16 @@
 """
-pipeline.py - one capture -> 3 blocks -> dimensions + crack mask + crack length per block (1.1 + 1.2 + 1.3).
-No grading yet (thresholds not signed off).
+pipeline.py - one capture -> 3 blocks -> dimensions + crack mask + crack length per block (1.1 + 1.2 + 1.3)
+-> grade per block (optional, --grader: needs a design trained on the A/B/C dataset).
 
     detect + crop (block_detect) -> L/W/H (dimensions.measure) -> crack U-Net on each crop (infer)
-    -> crack length on the block interior (crack_length) -> overlay window + saved record
+    -> crack length on the block interior (crack_length) -> grade: Reject if out of tolerance, else the
+    classifier (evaluation/designs.py) on the crop -> overlay window + saved record
 
 Live:     python pipeline.py --cam 0          (models/best.pt + models/unet_efficientnet-b0_best.pth by default)
           SPACE runs everything (laser off), L reruns with the current frame as the laser-ON frame, q quits.
           --side_cam 1: second camera, side view, measures height (models/height_detection.pt); SPACE grabs both.
 Offline:  python pipeline.py --img captures/xxx_raw.png [--laser_on on.png] [--side_img side.png]
+Grade:    python pipeline.py --img ... --grader d1     (models/d1_mobilenet_v3_large.pth from evaluation/train.py)
 Self-test: python pipeline.py --selftest
 
 Scale: --scale_ref (ArUco in frame) or mm_per_px_bed in --calib. Neither: dims skipped, crack length in px only.
@@ -28,9 +30,10 @@ from infer import predict_tiled
 
 
 def run(off, model, predict_fn, calib, laser_on=None, scale_ref=None, height_mm=None, nominal=None, tol=None,
-        thresh=0.5, side=None, side_model=None, **det_kw):
+        thresh=0.5, side=None, side_model=None, grade_fn=None, **det_kw):
     """off = laser-OFF frame (BGR). Returns measure()-style dict + per-block crack fields, "dims", "timings".
-    Crack model only runs when status == "ok"."""
+    Crack model only runs when status == "ok". grade_fn(crop_bgr) -> "A"|"B"|"C": adds b["grade"],
+    "Reject" when the block failed the dimension tolerance."""
     t0 = time.perf_counter()
     res = dict(status="no_scale")
     if scale_ref or "mm_per_px_bed" in calib:
@@ -61,6 +64,10 @@ def run(off, model, predict_fn, calib, laser_on=None, scale_ref=None, height_mm=
         b.update(crack_mm=c["length_mm"] if mpp else None, crack_px=c["length_px"], crack_pieces=c["n_pieces"],
                  crack_mm_per_px=mpp)
         res["timings"][f"crack_{b['label']}_s"] = round(time.perf_counter() - t, 3)
+        if grade_fn:   # same full crop that save() writes as <label>_crop.png, i.e. what the dataset is sorted from
+            t = time.perf_counter()
+            b["grade"] = "Reject" if b.get("tolerance") == "fail" else grade_fn(b["crop"])
+            res["timings"][f"grade_{b['label']}_s"] = round(time.perf_counter() - t, 3)
     if res["dims"] and not all(Z and (b.get("H_mm") or height_mm) for b in res["blocks"]):
         res["warnings"].append("crack mm uses the bed scale (no camera height or block height): reads too long")
     return res
@@ -77,7 +84,7 @@ def draw(res):
     th = max(2, round(s * 2))
     row = 4 if res["dims"] else 1                                     # below the text the draw function wrote
     for b in res["blocks"]:
-        lines = []
+        lines = [f"grade {b['grade']}"] if "grade" in b else []
         if "crack_px" in b:
             t = f"crack {b['crack_mm']:.1f} mm" if b["crack_mm"] is not None else f"crack {b['crack_px']:.0f} px"
             lines.append(f"{t} ({b['crack_pieces']} pcs)")
@@ -102,7 +109,7 @@ def save(res, off, laser_on, out, meta):
         cv2.imwrite(f"{d}/side_overlay.png", draw_side(res["side"]["image"], res["side"]))
     cv2.imwrite(f"{d}/overlay.png", draw(res))
     keep = ("label", "L_mm", "W_mm", "H_mm", "H_source", "shift_px", "side_px", "fill", "tolerance", "reasons",
-            "crack_mm", "crack_px", "crack_pieces", "crack_mm_per_px")
+            "crack_mm", "crack_px", "crack_pieces", "crack_mm_per_px", "grade")
     blocks = []
     for b in res["blocks"]:
         cv2.imwrite(f"{d}/{b['label']}_crop.png", b["crop"])
@@ -113,7 +120,8 @@ def save(res, off, laser_on, out, meta):
                        timings=res["timings"], blocks=blocks), f, indent=1, default=float)
     for b in blocks:
         side = f" (side {b['side_px']:.1f} px)" if b["side_px"] is not None else ""
-        print(f"  {b['label']}: L {b['L_mm']}  W {b['W_mm']}  H {b['H_mm']}{side}  {b['tolerance']}  "
+        grade = f" grade {b['grade']} " if b["grade"] is not None else ""
+        print(f"  {b['label']}:{grade}  L {b['L_mm']}  W {b['W_mm']}  H {b['H_mm']}{side}  {b['tolerance']}  "
               f"crack {b['crack_mm'] if b['crack_mm'] is not None else str(round(b['crack_px'])) + ' px'}"
               f" ({b['crack_pieces']} pcs)")
     for w in res["warnings"]:
@@ -180,7 +188,15 @@ def selftest():
     assert abs(mid["crack_mm"] - 199 * 0.5) < 199 * 0.5 * 0.03, mid["crack_mm"]
     assert left["crack_px"] == 0 and right["crack_px"] == 0
     assert abs(mid["L_mm"] - 150) < 2 and abs(mid["W_mm"] - 150) < 2, (mid["L_mm"], mid["W_mm"])
+    assert draw(r).shape == img.shape and "grade" not in mid
+
+    r = run(img, yolo, dark, dict(mm_per_px_bed=0.5), grade_fn=lambda crop: "B",   # 150 mm blocks vs 100 +/- 1
+            nominal=(100, 100, 60), tol=(1, 1, 1))
+    assert [b["grade"] for b in r["blocks"]] == ["Reject"] * 3, [(b["tolerance"], b["reasons"]) for b in r["blocks"]]
+    r = run(img, yolo, dark, dict(mm_per_px_bed=0.5), grade_fn=lambda crop: "B")   # no standard: classifier grades
+    assert [b["grade"] for b in r["blocks"]] == ["B"] * 3 and "grade_Middle_s" in r["timings"]
     assert draw(r).shape == img.shape
+    graded = r
 
     r = run(img, yolo, dark, {})                                      # no scale: px only, no dims
     assert not r["dims"] and r["blocks"][1]["crack_mm"] is None and abs(r["blocks"][1]["crack_px"] - 199) < 6
@@ -212,6 +228,19 @@ def selftest():
         saved = json.load(f)["blocks"]
     assert all(abs(b["side_px"] - 250) < 3 for b in saved), saved
     assert os.path.exists(f"{d}/side.png") and os.path.exists(f"{d}/side_overlay.png")
+    assert all(b["grade"] is None for b in saved)
+
+    d = tempfile.mkdtemp()                                            # grade is saved
+    save(graded, img, None, d, {})
+    with open(os.path.join(d, os.listdir(d)[0], "summary.json")) as f:
+        assert [b["grade"] for b in json.load(f)["blocks"]] == ["B"] * 3
+    try:                                                              # the real (untrained) classifier plugs in
+        from evaluation.designs import load as load_grader
+    except ImportError:
+        print("torchvision not installed: real-classifier check skipped")
+    else:
+        r = run(img, yolo, dark, dict(mm_per_px_bed=0.5), grade_fn=load_grader("d1", None))
+        assert all(b["grade"] in ("A", "B", "C") for b in r["blocks"]), [b["grade"] for b in r["blocks"]]
     print("selftest: ALL PASS")
 
 
@@ -236,6 +265,8 @@ def main():
     ap.add_argument("--thresh", type=float, default=0.5, help="crack probability threshold")
     ap.add_argument("--edge_frac", type=float, default=0.10, help="ignore this fraction of each box side (walls, shadows)")
     ap.add_argument("--threads", type=int, default=0, help="CPU threads (0 = library default)")
+    ap.add_argument("--grader", choices=("d1", "d2", "d3"), help="A/B/C classifier design (evaluation/designs.py)")
+    ap.add_argument("--grader_weights", help="default: the design's file in models/ (from evaluation/train.py)")
     ap.add_argument("--out", default="pipeline_out")
     a = ap.parse_args()
     if a.selftest:
@@ -244,16 +275,24 @@ def main():
     for p in (a.weights, a.ckpt) + ((a.side_weights,) if use_side else ()):
         if not os.path.exists(p):
             ap.error(f"{p} not found: run  python download_models.py")
+    if a.grader:   # never grade with an untrained model
+        from evaluation.designs import load as load_grader, weights_path
+        a.grader_weights = a.grader_weights or weights_path(a.grader)
+        if not os.path.exists(a.grader_weights):
+            ap.error(f"{a.grader_weights} not found: train it on the A/B/C dataset first "
+                     f"(python evaluation/train.py --design {a.grader})")
     from ultralytics import YOLO
     from infer import load_predict_fn
     fn, device = load_predict_fn(a.ckpt, a.backbone, a.threads)
     triple = lambda s: tuple(map(float, s.split(","))) if s else None
     kw = dict(model=YOLO(a.weights), predict_fn=fn, calib=load_calib(a.calib), scale_ref=a.scale_ref,
               height_mm=a.height_mm, nominal=triple(a.nominal), tol=triple(a.tol), thresh=a.thresh,
-              conf=a.conf, edge_frac=a.edge_frac, side_model=YOLO(a.side_weights) if use_side else None)
+              conf=a.conf, edge_frac=a.edge_frac, side_model=YOLO(a.side_weights) if use_side else None,
+              grade_fn=load_grader(a.grader, a.grader_weights) if a.grader else None)
     meta = dict(weights=os.path.basename(a.weights), ckpt=os.path.basename(a.ckpt), backbone=a.backbone,
                 thresh=a.thresh, edge_frac=a.edge_frac, device=device,
-                **({"side_weights": os.path.basename(a.side_weights)} if use_side else {}))
+                **({"side_weights": os.path.basename(a.side_weights)} if use_side else {}),
+                **({"grader": a.grader, "grader_weights": os.path.basename(a.grader_weights)} if a.grader else {}))
     if a.cam is not None:
         return run_camera(a.cam, a.out, meta, side_cam=a.side_cam, **kw)
     if not a.img:

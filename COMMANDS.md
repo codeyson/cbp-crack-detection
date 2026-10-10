@@ -146,7 +146,7 @@ Note: the model is DeepCrack-pretrained only. It is not reliable on pavers until
 
 ## End-to-end pipeline: `pipeline.py` (start here)
 
-Detect + crop, dimensions, crack mask and crack length for all 3 blocks in one go. No grading yet.
+Detect + crop, dimensions, crack mask and crack length for all 3 blocks in one go. Grading is optional (`--grader`, see below).
 
 Two cameras, top + side (height from the side camera, after `--fit_side`). SPACE grabs both, q quits:
 
@@ -172,6 +172,26 @@ python pipeline.py --img captures/<stamp>_raw.png
 Scale: `--scale_ref 50` (ArUco in frame) or `mm_per_px_bed` in `--calib`. With neither, dimensions are skipped and crack length is in px.
 Also takes `--conf` (default 0.3 here), `--edge_frac` (default 0.10), `--weights`, `--ckpt`, `--laser_on`, `--side_weights`, `--height_mm`, `--nominal`, `--tol`, `--thresh`, `--threads`, `--backbone`.
 Output: `pipeline_out/<timestamp>/` with `off.png`, `laser.png`, `side.png`, `side_overlay.png`, `overlay.png`, `<Label>_crop.png`, `<Label>_mask.png`, `summary.json` (values, warnings, per-step timings, model names). Nothing is saved unless exactly 3 blocks are found.
+
+### Grading: `--grader d1|d2|d3`
+
+A block that fails `--nominal`/`--tol` is `Reject`. Every other block gets A/B/C from the classifier design on its `<Label>_crop.png`. The grade goes into the overlay, the console and `summary.json`.
+
+```bash
+python pipeline.py --cam 0 --calib calib.json --nominal 200,100,60 --tol 1.6,1.6,3.2 --grader d1
+```
+
+Weights default to `models/<design>_<arch>.pth` from `evaluation/train.py`; `--grader_weights` overrides. It refuses to run without trained weights, so no untrained grades are ever shown.
+
+### Building the A/B/C dataset
+
+1. Capture blocks with `pipeline.py` on the rig (same camera and lighting as real use).
+2. Copy each `pipeline_out/<timestamp>/<Label>_crop.png` into `raw/A`, `raw/B` or `raw/C` as `<timestamp>_<Label>.png` (the timestamp keeps names unique).
+   - Only crops from the rig camera; no phone photos, no whole-rig photos.
+   - No Reject folder: Reject comes from the size/weight check, not the classifier. Don't copy blocks whose `tolerance` in `summary.json` is `fail`.
+3. `python evaluation/make_split.py raw dataset` (once: this freezes the test set).
+4. `python evaluation/train.py --design d1` (and d2, d3 for the comparison, see `evaluation/README.md`).
+5. `python pipeline.py ... --grader d1`.
 
 ## Training (Google Colab, not on this PC)
 

@@ -23,7 +23,7 @@ Three blocks are placed on the rig at a time. Then:
 5. **Find cracks.** A crack model (U-Net) marks every crack pixel on each block. The software then measures the total crack length in millimetres.
 6. **Grade the block.**
    - If the size or weight is outside the allowed tolerance, the block is **rejected**.
-   - Otherwise, the total crack length decides **Grade A, B or C**.
+   - Otherwise, a deep-learning classifier looks at the block crop and decides **Grade A, B or C** (designs compared in `evaluation/`).
    - Chipped, spalled or shattered blocks are **Grade C**.
 
 ## Current status
@@ -34,8 +34,8 @@ Three blocks are placed on the rig at a time. Then:
 | Measuring length, width and height | Working, needs calibration on the real rig |
 | Crack detection and crack length | Working, but **not yet reliable on pavers** (see below) |
 | Weight from load cells | Not built yet |
-| Grading (A/B/C/Reject) | Not built yet. Crack-length thresholds still need to be agreed |
-| One-button run of the whole process (`pipeline.py`) | Working (no grading yet) |
+| Grading (A/B/C/Reject) | Step ready in `pipeline.py --grader`. Waiting on the A/B/C dataset to train the classifier |
+| One-button run of the whole process (`pipeline.py`) | Working (grades once a classifier is trained) |
 | Mix formula recommendation | Out of scope for this repo |
 
 ## Important things to know
@@ -43,7 +43,7 @@ Three blocks are placed on the rig at a time. Then:
 - **The crack model is not trained on pavers yet.** It was trained on a public crack dataset (DeepCrack). It must be fine-tuned on photos from this rig before its results can be trusted.
 - **Calibrate whenever the setup changes.** If the camera or laser moves, redo the calibration, or the measurements will be wrong.
 - **Use one camera.** Training and real use should use the same camera and lighting. Mixing cameras makes the model less accurate.
-- **The grade thresholds must be set before the main data collection.** Changing them afterward means re-checking everything.
+- **Agree what counts as Grade A, B and C before sorting the dataset.** Changing it afterward means re-labelling everything.
 - **Model files are not in git.** `python download_models.py` fetches them from the GitHub Release into `models/`.
 - **Only rectangular blocks are supported.**
 
