@@ -2,7 +2,7 @@
 evaluate.py - measure one design against the design constraints. Run on the rig laptop, one design per run
 (separate processes, so one model's memory does not count against another).
 
-Each call does 1 runs by default (--runs): 1 fresh processes, one inspection cycle each, rows sharing one
+Each call does 20 runs by default (--runs): 20 fresh processes, one inspection cycle each, rows sharing one
 batch id. tradeoff.py averages the newest batch per design and plots every run (runs.png).
 
 Final (needs the labeled dataset and trained weights):
@@ -155,7 +155,7 @@ if __name__ == "__main__":
     ap.add_argument("--data", default="dataset", help="needs dataset/test/{A,B,C}/")
     ap.add_argument("--weights", help="default: the design's file in models/")
     ap.add_argument("--img_dir", help="any block crops: no labels, untrained model, speed/memory only")
-    ap.add_argument("--runs", type=int, default=1, help="separate runs (fresh process each), averaged by tradeoff.py")
+    ap.add_argument("--runs", type=int, default=20, help="separate runs (fresh process each), averaged by tradeoff.py")
     ap.add_argument("--cycles", type=int, default=1, help="full passes over the images per run (inspection cycles)")
     ap.add_argument("--batch", default="", help=argparse.SUPPRESS)   # set by the --runs loop
     ap.add_argument("--results", default=f"{HERE}/results", help="e.g. evaluation/results/provisional")

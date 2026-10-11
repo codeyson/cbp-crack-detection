@@ -38,7 +38,8 @@ def append_row(path, row):
         w.writerow(row)
 
 
-def run(design, data, epochs, imgsz=224, batch=32, out="models", results=f"{HERE}/results", pretrained=True):
+def run(design, data, epochs, imgsz=None, batch=32, out="models", results=f"{HERE}/results", pretrained=True):
+    imgsz = imgsz or designs.IMGSZ[design]
     if pretrained:
         designs.build(design, pretrained=True)   # download/cache ImageNet weights outside the timer
     start = time.perf_counter()
@@ -58,7 +59,7 @@ if __name__ == "__main__":
     ap.add_argument("--design", required=True, choices=DESIGNS)
     ap.add_argument("--data", default="dataset")
     ap.add_argument("--epochs", type=int, default=30)
-    ap.add_argument("--imgsz", type=int, default=224)
+    ap.add_argument("--imgsz", type=int, help="default: the design's own input size (designs.IMGSZ)")
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--out", default="models")
     a = ap.parse_args()

@@ -2,11 +2,16 @@
 designs.py - the 3 alternative designs: ImageNet-pretrained torchvision classifiers, block crop -> grade A/B/C.
 All three use this same training and prediction code, so only the architecture differs.
 
-    D1 MobileNetV3-Large  5.5M params   speed-first (depthwise convolutions, NAS-designed)
-    D2 EfficientNet-B0    5.3M params   accuracy-per-parameter (compound scaling)
-    D3 ResNet18          11.7M params   classic residual baseline
+    D1 MobileNetV3-Large        4.2M params  224 px  speed-first (depthwise convolutions, NAS-designed)
+    D2 EfficientNet-B0, slim    2.9M params  160 px  stage 7 + 1280-ch head removed, smaller input
+    D3 ResNet18, slim           2.8M params  224 px  last residual stage (layer4) removed
+    (params with the 3-class head)
 
-    train("d1", "dataset", epochs=30, imgsz=224, out="models")   # dataset/{train,val}/{A,B,C}/*.png
+D2 and D3 were slimmed to compete with D1 on inference time and memory: memory differences between the designs are
+mostly model size, inference time is depth x input size. Input sizes were picked on CPU (untrained, real crops) as
+the largest that keeps the design about as fast as D1: D2 160 px 25.0 ms, D3 224 px 21.2 ms, D1 224 px 24.0 ms.
+
+    train("d1", "dataset", epochs=30, out="models")   # dataset/{train,val}/{A,B,C}/*.png, input size IMGSZ["d1"]
     predict = load("d1", "models/d1_mobilenet_v3_large.pth")
     predict(cv2.imread("crop.png"))                               # -> "A"
 
@@ -22,14 +27,19 @@ from torchvision import datasets, models, transforms
 
 DESIGNS = dict(d1="mobilenet_v3_large", d2="efficientnet_b0", d3="resnet18")
 SOURCE = dict(d1="mobilenetv3.py", d2="efficientnet.py", d3="resnet.py")   # in torchvision/models/
+IMGSZ = dict(d1=224, d2=160, d3=224)                                         # input px per design (see top)
 MEAN, STD = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]                   # ImageNet
 
 
 def build(design, n_classes=3, pretrained=True):
     model = getattr(models, DESIGNS[design])(weights="DEFAULT" if pretrained else None)
-    if hasattr(model, "fc"):   # ResNet
-        model.fc = nn.Linear(model.fc.in_features, n_classes)
-    else:                      # MobileNet, EfficientNet: last layer of the classifier
+    if design == "d2":         # slim: drop stage 7 and the 1280-channel head conv, stage 6 gives 192 channels
+        model.features = model.features[:7]
+        model.classifier[-1] = nn.Linear(192, n_classes)
+    elif design == "d3":       # slim: drop the last residual stage, layer3 gives 256 channels
+        model.layer4 = nn.Identity()
+        model.fc = nn.Linear(256, n_classes)
+    else:                      # MobileNet: last layer of the classifier
         model.classifier[-1] = nn.Linear(model.classifier[-1].in_features, n_classes)
     return model
 
@@ -38,7 +48,8 @@ def weights_path(design, out="models"):
     return os.path.join(out, f"{design}_{DESIGNS[design]}.pth")
 
 
-def train(design, data_dir, epochs=30, imgsz=224, out="models", batch=32, lr=1e-3, seed=0, pretrained=True):
+def train(design, data_dir, epochs=30, imgsz=None, out="models", batch=32, lr=1e-3, seed=0, pretrained=True):
+    imgsz = imgsz or IMGSZ[design]
     torch.manual_seed(seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     norm = [transforms.ToTensor(), transforms.Normalize(MEAN, STD)]
@@ -71,9 +82,9 @@ def train(design, data_dir, epochs=30, imgsz=224, out="models", batch=32, lr=1e-
     return path
 
 
-def load(design, weights=None, imgsz=224):
+def load(design, weights=None, imgsz=None):
     """weights=None: untrained model, only for timing/memory before the dataset exists."""
-    classes = ["A", "B", "C"]
+    classes, imgsz = ["A", "B", "C"], imgsz or IMGSZ[design]
     model = build(design, len(classes), pretrained=False)
     if weights:
         ckpt = torch.load(weights, map_location="cpu")

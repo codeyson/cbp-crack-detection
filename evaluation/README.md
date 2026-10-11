@@ -6,9 +6,11 @@ Each design is a deep-learning image classifier. It takes one block crop and out
 
 | Design | Model | Size | Architecture family | Built for |
 |---|---|---|---|---|
-| D1 | MobileNetV3-Large | 5.5M params | Depthwise-separable, NAS-designed | Speed on mobile CPUs |
-| D2 | EfficientNet-B0 | 5.3M params | Compound-scaled MBConv | Accuracy per parameter |
-| D3 | ResNet18 | 11.7M params | Residual blocks | Classic, simple baseline |
+| D1 | MobileNetV3-Large | 4.2M params, 224 px | Depthwise-separable, NAS-designed | Speed on mobile CPUs |
+| D2 | EfficientNet-B0, slim | 2.9M params, 160 px | Compound-scaled MBConv; stage 7 and the 1280-channel head removed | Speed and memory |
+| D3 | ResNet18, slim | 2.8M params, 224 px | Residual blocks; last stage (layer4) removed | Speed and memory |
+
+Params are with the 3-class head. D2 and D3 were slimmed to compete with D1 on inference time and memory. Each design's input size is the largest that keeps it about as fast as D1 on the rig CPU (untrained, real crops): D1 24.0 ms, D2 25.0 ms, D3 21.2 ms. See `designs.py`.
 
 All three start from ImageNet weights and are fine-tuned on our crops (transfer learning). The code is in [designs.py](designs.py).
 
@@ -24,7 +26,7 @@ Why these three:
 |---|---|---|---|---|
 | Reliability | Misclassification rate (%) | `(1 - accuracy_score) x 100` on the test set | lowest | `evaluate.py` |
 | Performance | Average inference time (s) | `time.perf_counter()` around every prediction | lowest | `evaluate.py` |
-| Efficiency | Average memory usage (%) | `psutil` `memory_percent()` after every prediction, averaged over 50 runs | lowest | `evaluate.py` |
+| Efficiency | Average memory usage (%) | `psutil` `memory_percent()` after every prediction, averaged over 20 runs | lowest | `evaluate.py` |
 | Manufacturability | Training time (s) | `time.perf_counter()` before and after training | lowest | `train.py` |
 | Sustainability | Maintainability Index | `radon` on the design's source code: `designs.py` plus its torchvision architecture file, weighted by lines of code | highest | `evaluate.py` |
 
@@ -40,7 +42,7 @@ Outputs go to `evaluation/results/`:
 - `evaluation.csv`
 - `confusion_<design>.csv`
 
-Each `evaluate.py --design dX` call does **50 runs**, each in a fresh process with one inspection cycle over all the images. The 50 rows share one batch ID. `tradeoff.py` averages the newest batch of each design and ignores older batches. A run takes about 10 s on 36 crops, so one design takes about 8–9 minutes. Use `--runs 1` for a quick check.
+Each `evaluate.py --design dX` call does **20 runs**, each in a fresh process with one inspection cycle over all the images. The 20 rows share one batch ID. `tradeoff.py` averages the newest batch of each design and ignores older batches. A run takes about 20 s on 36 crops, so one design takes about 7 minutes. Use `--runs 1` for a quick check.
 
 ## What can be done without the A/B/C dataset
 
