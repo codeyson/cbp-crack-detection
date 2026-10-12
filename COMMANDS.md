@@ -173,7 +173,9 @@ Note: the model is DeepCrack-pretrained only. It is not reliable on pavers until
 
 ## End-to-end pipeline: `pipeline.py` (start here)
 
-Detect + crop, dimensions, crack mask and crack length for all 3 blocks in one go. No grading yet.
+Detect + crop, dimensions, weight, crack mask, crack length and grade for all 3 blocks in one go.
+Grade: **Reject** when the L/W/H or weight tolerance check fails, otherwise the classifier's A/B/C: it grades 330 px grayscale patches of the block interior (what it was trained on) and the most common patch grade wins (`grade_patches` in `summary.json`).
+The classifier is D1 (MobileNetV3, the trade-off winner, `models/d1_mobilenet_v3_large.pth`); `--design d2|d3` swaps it, `--design none` skips grading.
 
 Two cameras, top + side (height from the side camera, after `--fit_side`). SPACE grabs both, q quits:
 
@@ -191,7 +193,7 @@ python pipeline.py --cam 0 --calib calib.json
 ```
 
 With the load cells: add `--scale COM5`. The preview shows the live weights (red = not stable yet; wait for green before SPACE).
-A "results" window shows L, W, H, weight and PASS/FAIL per block:
+A "results" window shows L, W, H, weight, PASS/FAIL and the grade per block:
 
 ```bash
 python pipeline.py --cam 0 --calib calib.json --scale COM5 --nominal 200,100,60 --tol 1.6,1.6,3.2 --nominal_g 2400 --tol_g 100
@@ -206,8 +208,8 @@ python pipeline.py --img captures/<stamp>_raw.png
 ```
 
 Scale: `--scale_ref 50` (ArUco in frame) or `mm_per_px_bed` in `--calib`. With neither, dimensions are skipped and crack length is in px.
-Also takes `--conf` (default 0.3 here), `--edge_frac` (default 0.10), `--weights`, `--ckpt`, `--laser_on`, `--side_weights`, `--height_mm`, `--nominal`, `--tol`, `--nominal_g`, `--tol_g`, `--thresh`, `--threads`, `--backbone`.
-Output: `pipeline_out/<timestamp>/` with `off.png`, `laser.png`, `side.png`, `side_overlay.png`, `overlay.png`, `<Label>_crop.png`, `<Label>_mask.png`, `summary.json` (values incl. `weight_g`, warnings, per-step timings, model names). Nothing is saved unless exactly 3 blocks are found.
+Also takes `--conf` (default 0.3 here), `--edge_frac` (default 0.10), `--weights`, `--ckpt`, `--laser_on`, `--side_weights`, `--height_mm`, `--nominal`, `--tol`, `--nominal_g`, `--tol_g`, `--thresh`, `--threads`, `--backbone`, `--design`.
+Output: `pipeline_out/<timestamp>/` with `off.png`, `laser.png`, `side.png`, `side_overlay.png`, `overlay.png`, `<Label>_crop.png`, `<Label>_mask.png`, `summary.json` (values incl. `weight_g`, `grade`, `class_grade`, warnings, per-step timings, model names). Nothing is saved unless exactly 3 blocks are found.
 
 ## Training (Google Colab, not on this PC)
 

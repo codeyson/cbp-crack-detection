@@ -23,8 +23,8 @@ Three blocks are placed on the rig at a time. Then:
 5. **Find cracks.** A crack model (U-Net) marks every crack pixel on each block. The software then measures the total crack length in millimetres.
 6. **Grade the block.**
    - If the size or weight is outside the allowed tolerance, the block is **rejected**.
-   - Otherwise, the total crack length decides **Grade A, B or C**.
-   - Chipped, spalled or shattered blocks are **Grade C**.
+   - Otherwise, an image classifier (D1, MobileNetV3) looks at the block crop and decides **Grade A, B or C**.
+     Chipped, spalled or shattered blocks are **Grade C**. The crack length is reported next to it.
 
 ## Current status
 
@@ -34,8 +34,8 @@ Three blocks are placed on the rig at a time. Then:
 | Measuring length, width and height | Working, needs calibration on the real rig |
 | Crack detection and crack length | Working, but **not yet reliable on pavers** (see below) |
 | Weight from load cells | Built (ESP32-S3 firmware + `loadcell.py`), calibrated in the sketch |
-| Grading (A/B/C/Reject) | Not built yet. Crack-length thresholds still need to be agreed |
-| One-button run of the whole process (`pipeline.py`) | Working (no grading yet) |
+| Grading (A/B/C/Reject) | Working: Reject from the tolerance checks, A/B/C from the D1 classifier |
+| One-button run of the whole process (`pipeline.py`) | Working, up to the grade |
 | Mix formula recommendation | Out of scope for this repo |
 
 ## Important things to know
@@ -51,7 +51,7 @@ Three blocks are placed on the rig at a time. Then:
 
 | File | What it does |
 |---|---|
-| `pipeline.py` | Runs everything on one capture: blocks, size, cracks. Start here |
+| `pipeline.py` | Runs everything on one capture: blocks, size, weight, cracks, grade. Start here |
 | `download_models.py` | Downloads the trained models into `models/` |
 | `block_detect.py` | Finds the 3 blocks and crops them |
 | `dimensions.py` | Measures length, width and height; calibration tools |

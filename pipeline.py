@@ -1,13 +1,15 @@
 """
-pipeline.py - one capture -> 3 blocks -> dimensions + crack mask + crack length per block (1.1 + 1.2 + 1.3).
-No grading yet (thresholds not signed off).
+pipeline.py - one capture -> 3 blocks -> dimensions + weight + crack length + grade per block.
 
-    detect + crop (block_detect) -> L/W/H (dimensions.measure) -> crack U-Net on each crop (infer)
-    -> crack length on the block interior (crack_length) -> overlay window + saved record
+    detect + crop (block_detect) -> L/W/H (dimensions.measure) -> weight (loadcell) -> crack U-Net on each crop
+    (infer) -> crack length on the block interior (crack_length) -> grade classifier on each crop
+    (evaluation/designs.py, default D1 = trade-off winner) -> overlay window + saved record
+    grade: Reject when the L/W/H or weight tolerance check fails, else the classifier's A/B/C.
 
 Live:     python pipeline.py --cam 0          (models/best.pt + models/unet_efficientnet-b0_best.pth by default)
           SPACE runs everything (laser off), L reruns with the current frame as the laser-ON frame, q quits.
           --side_cam 1: second camera, side view, measures height (models/height_detection.pt); SPACE grabs both.
+          --design d1|d2|d3|none: grade classifier (models/<design>_*.pth, default d1).
 Offline:  python pipeline.py --img captures/xxx_raw.png [--laser_on on.png] [--side_img side.png]
 Self-test: python pipeline.py --selftest
 
@@ -28,10 +30,11 @@ from infer import predict_tiled
 
 
 def run(off, model, predict_fn, calib, laser_on=None, scale_ref=None, height_mm=None, nominal=None, tol=None,
-        thresh=0.5, side=None, side_model=None, weights=None, nominal_g=None, tol_g=None, **det_kw):
+        thresh=0.5, side=None, side_model=None, weights=None, nominal_g=None, tol_g=None, classify=None, **det_kw):
     """off = laser-OFF frame (BGR). Returns measure()-style dict + per-block crack fields, "dims", "timings".
     weights: loadcell.read_weights() dict, read at capture time -> weight_g per block, tolerance fail when
-    |weight_g - nominal_g| > tol_g. Crack model only runs when status == "ok"."""
+    |weight_g - nominal_g| > tol_g. classify: image (BGR) -> "A"|"B"|"C" (designs.load), run on patches of the block
+    interior (grade_patches); grade = "Reject" when the tolerance check failed, else the worst patch. Crack model and classifier only run when status == "ok"."""
     t0 = time.perf_counter()
     res = dict(status="no_scale")
     if scale_ref or "mm_per_px_bed" in calib:
@@ -64,9 +67,35 @@ def run(off, model, predict_fn, calib, laser_on=None, scale_ref=None, height_mm=
         b.update(crack_mm=c["length_mm"] if mpp else None, crack_px=c["length_px"], crack_pieces=c["n_pieces"],
                  crack_mm_per_px=mpp)
         res["timings"][f"crack_{b['label']}_s"] = round(time.perf_counter() - t, 3)
+        if classify:   # tolerance is final here: add_weights ran before this loop
+            t = time.perf_counter()
+            b["class_grade"], b["grade_patches"] = grade_patches(classify, b["crop"], b["interior"])
+            b["grade"] = "Reject" if b.get("tolerance") == "fail" else b["class_grade"]
+            res["timings"][f"grade_{b['label']}_s"] = round(time.perf_counter() - t, 3)
     if res["dims"] and not all(Z and (b.get("H_mm") or height_mm) for b in res["blocks"]):
         res["warnings"].append("crack mm uses the bed scale (no camera height or block height): reads too long")
     return res
+
+
+def grade_patches(classify, crop, interior, patch=330):
+    """Most common grade over square grayscale patches of the block interior, half-overlapping, a tie goes to the
+    worse grade -> (grade, {grade: count}).
+    The classifier was trained on 330 px grayscale close-ups of concrete surface, not on whole colour blocks with
+    edges and background: a whole crop squashed to 224 px came out B/C on clean Grade A blocks, patches came out A.
+    Worst patch wins was tried too: 2 of 3 clean Grade A blocks came out B (a few B patches on speckles and bevels).
+    ponytail: majority vote and patch size in px (camera dependent), both untested on cracked blocks from the rig;
+    a crack covering few patches can be outvoted. Retrain on rig patches, then revisit the vote."""
+    ys, xs = np.nonzero(interior)
+    g = cv2.cvtColor(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+    h, w = g.shape[:2]
+    s = min(patch, h, w)
+    starts = lambda n: sorted({*range(0, n - s + 1, s // 2), n - s})       # last patch flush with the far edge
+    counts = {}
+    for y in starts(h):
+        for x in starts(w):
+            c = classify(g[y:y + s, x:x + s])
+            counts[c] = counts.get(c, 0) + 1
+    return max(counts, key=lambda c: (counts[c], c)), counts          # "A" < "B" < "C": a tie goes to the worse
 
 
 def add_weights(res, weights, nominal_g=None, tol_g=None):
@@ -93,7 +122,7 @@ def draw(res):
     th = max(2, round(s * 2))
     row = 4 if res["dims"] else 1                                     # below the text the draw function wrote
     for b in res["blocks"]:
-        lines = []
+        lines = [f"Grade {b['grade']}"] if "grade" in b else []
         if "crack_px" in b:
             t = f"crack {b['crack_mm']:.1f} mm" if b["crack_mm"] is not None else f"crack {b['crack_px']:.0f} px"
             lines.append(f"{t} ({b['crack_pieces']} pcs)")
@@ -109,13 +138,14 @@ def draw(res):
 
 def draw_table(res):
     """Results window: one row per block, L/W/H (mm), weight (g), PASS/FAIL. Missing values show "-"."""
-    cols = [("Block", 20), ("L (mm)", 150), ("W (mm)", 270), ("H (mm)", 390), ("Weight (g)", 510), ("Result", 680)]
-    img = np.full((70 + 50 * len(res["blocks"]), 820, 3), 255, np.uint8)
+    cols = [("Block", 20), ("L (mm)", 150), ("W (mm)", 270), ("H (mm)", 390), ("Weight (g)", 510), ("Result", 680),
+            ("Grade", 830)]
+    img = np.full((70 + 50 * len(res["blocks"]), 960, 3), 255, np.uint8)
     f = lambda v: "-" if v is None else f"{v:.1f}"
     put = lambda t, x, y, col=(0, 0, 0): cv2.putText(img, t, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, col, 2)
     for name, x in cols:
         put(name, x, 40)
-    cv2.line(img, (10, 55), (810, 55), (0, 0, 0), 1)
+    cv2.line(img, (10, 55), (950, 55), (0, 0, 0), 1)
     for i, b in enumerate(res["blocks"]):
         y = 95 + 50 * i
         tol = b.get("tolerance")
@@ -124,7 +154,9 @@ def draw_table(res):
         for t, (_, x) in zip([b["label"], f(b.get("L_mm")), f(b.get("W_mm")), f(b.get("H_mm")), f(b.get("weight_g"))],
                              cols):
             put(t, x, y)
-        put(result, cols[-1][1], y, col)
+        put(result, cols[-2][1], y, col)
+        g = b.get("grade", "-")
+        put(g, cols[-1][1], y, {"A": (0, 160, 0), "B": (0, 140, 255), "C": (0, 90, 255), "Reject": (0, 0, 220)}.get(g, (0, 0, 0)))
     return img
 
 
@@ -139,7 +171,7 @@ def save(res, off, laser_on, out, meta):
         cv2.imwrite(f"{d}/side_overlay.png", draw_side(res["side"]["image"], res["side"]))
     cv2.imwrite(f"{d}/overlay.png", draw(res))
     keep = ("label", "L_mm", "W_mm", "H_mm", "H_source", "shift_px", "side_px", "fill", "tolerance", "reasons",
-            "crack_mm", "crack_px", "crack_pieces", "crack_mm_per_px", "weight_g")
+            "crack_mm", "crack_px", "crack_pieces", "crack_mm_per_px", "weight_g", "class_grade", "grade_patches", "grade")
     blocks = []
     for b in res["blocks"]:
         cv2.imwrite(f"{d}/{b['label']}_crop.png", b["crop"])
@@ -153,7 +185,7 @@ def save(res, off, laser_on, out, meta):
         wt = f"  {b['weight_g']} g" if b["weight_g"] is not None else ""
         print(f"  {b['label']}: L {b['L_mm']}  W {b['W_mm']}  H {b['H_mm']}{side}{wt}  {b['tolerance']}  "
               f"crack {b['crack_mm'] if b['crack_mm'] is not None else str(round(b['crack_px'])) + ' px'}"
-              f" ({b['crack_pieces']} pcs)")
+              f" ({b['crack_pieces']} pcs)  grade {b['grade'] or '-'}")
     for w in res["warnings"]:
         print("  WARNING:", w)
     print(f"timings {res['timings']} -> {d}")
@@ -255,6 +287,18 @@ def selftest():
     assert r["blocks"][0]["tolerance"] == "no_standard" and "load cells not stable" in r["warnings"]   # no L/W/H standard: weight pass is not PASS
     t = draw_table(r)
     assert t.ndim == 3 and t.shape[1] >= 600
+    r = run(img, yolo, dark, dict(mm_per_px_bed=0.5), weights=w, nominal_g=1000, tol_g=50, classify=lambda c: "B")
+    assert [b["grade"] for b in r["blocks"]] == ["B", "Reject", "B"]  # weight fail overrides the classifier
+    assert r["blocks"][1]["class_grade"] == "B" and draw_table(r).shape[1] >= 900 and draw(r).shape == img.shape
+    crop, inner = np.zeros((700, 400, 3), np.uint8), np.zeros((700, 400), bool)
+    inner[50:650, 50:350] = True
+    crop[600:640, 300:340] = 255                                     # one bright spot in the bottom-right corner
+    seen = []
+    worst = lambda p: seen.append(p.shape) or ("C" if p.max() else "A")
+    assert grade_patches(worst, crop, inner, patch=200) == ("A", {"A": 9, "C": 1})   # 10 patches, majority A
+    flip = iter("AB" * 5)                                             # 10 patches, 5 A and 5 B: tie -> worse
+    assert grade_patches(lambda p: next(flip), crop, inner, patch=200) == ("B", {"A": 5, "B": 5})
+    assert all(sh == (200, 200, 3) for sh in seen)                   # square, gray as 3 channels, edge patch reached
     r = run(img, FakeYOLO(boxes[:2]), dark, {}, weights=w)            # wrong count: no crash
     assert r["status"] == "wrong_count"
 
@@ -280,7 +324,7 @@ def selftest():
     with open(f"{d}/summary.json") as f:
         saved = json.load(f)["blocks"]
     assert all(abs(b["side_px"] - 250) < 3 for b in saved), saved
-    assert "weight_g" in saved[0]
+    assert "weight_g" in saved[0] and "grade" in saved[0]
     assert os.path.exists(f"{d}/side.png") and os.path.exists(f"{d}/side_overlay.png")
     print("selftest: ALL PASS")
 
@@ -297,6 +341,8 @@ def main():
     ap.add_argument("--weights", default="models/best.pt", help="YOLO block detector")
     ap.add_argument("--ckpt", default="models/unet_efficientnet-b0_best.pth", help="crack U-Net checkpoint")
     ap.add_argument("--backbone", default="efficientnet-b0")
+    ap.add_argument("--design", default="d1", choices=("d1", "d2", "d3", "none"),
+                    help="grade classifier (evaluation/designs.py); d1 won the trade-off; none = no grading")
     ap.add_argument("--calib", default="calib.json")
     ap.add_argument("--scale_ref", type=float, help="ArUco marker black-square side in mm (measured)")
     ap.add_argument("--height_mm", type=float, help="assumed block height when there is no laser frame")
@@ -314,7 +360,11 @@ def main():
     if a.selftest:
         return selftest()
     use_side = a.side_cam is not None or a.side_img
-    for p in (a.weights, a.ckpt) + ((a.side_weights,) if use_side else ()):
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "evaluation"))
+    import designs
+    grader = designs.weights_path(a.design) if a.design != "none" else None
+    for p in (a.weights, a.ckpt) + ((a.side_weights,) if use_side else ()) + ((grader,) if grader else ()):
         if not os.path.exists(p):
             ap.error(f"{p} not found: run  python download_models.py")
     scale = None
@@ -331,9 +381,9 @@ def main():
     kw = dict(model=YOLO(a.weights), predict_fn=fn, calib=load_calib(a.calib), scale_ref=a.scale_ref,
               height_mm=a.height_mm, nominal=triple(a.nominal), tol=triple(a.tol), thresh=a.thresh,
               conf=a.conf, edge_frac=a.edge_frac, side_model=YOLO(a.side_weights) if use_side else None,
-              nominal_g=a.nominal_g, tol_g=a.tol_g)
+              nominal_g=a.nominal_g, tol_g=a.tol_g, classify=designs.load(a.design, grader) if grader else None)
     meta = dict(weights=os.path.basename(a.weights), ckpt=os.path.basename(a.ckpt), backbone=a.backbone,
-                thresh=a.thresh, edge_frac=a.edge_frac, device=device,
+                thresh=a.thresh, edge_frac=a.edge_frac, device=device, design=a.design,
                 **({"side_weights": os.path.basename(a.side_weights)} if use_side else {}))
     if a.cam is not None:
         return run_camera(a.cam, a.out, meta, side_cam=a.side_cam, scale=scale, **kw)
