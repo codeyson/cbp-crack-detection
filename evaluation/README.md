@@ -31,7 +31,7 @@ Why these three:
 | Sustainability | Maintainability Index | `radon` on the design's source code: `designs.py` plus its torchvision architecture file, weighted by lines of code | highest | `evaluate.py` |
 
 Rules that keep it fair:
-- Same dataset split, epochs, image size (224), batch size, and seed for every design.
+- Same dataset split, epochs, batch size, and seed for every design. Input size is per design (`designs.IMGSZ`: D1 224, D2 160, D3 224 px).
 - Training runs in Colab on the same GPU type. The GPU name is saved with the result.
 - Downloading the ImageNet weights is not counted in training time.
 - Final inference runs on the MiniPC (the rig computer), one design per run, with other apps closed. The first 5 predictions (warm-up) and reading the image from disk are not timed.
@@ -112,7 +112,7 @@ Run all commands from the repo folder, with the venv active.
 ### Part C: Final evaluation
 
 9. Train in Colab:
-   - Upload `dataset/` to Google Drive at `MyDrive/cbp/dataset`.
+   - Zip the dataset (`tar -a -c -f dataset.zip dataset`, built into Windows) and upload `dataset.zip` to Google Drive at `MyDrive/cbp/dataset.zip`. One zip uploads much faster than thousands of files.
    - Open `evaluation/train_designs.ipynb` in Colab and pick the T4 GPU.
    - Run all cells. It trains D1, D2 and D3 with the same settings.
    - It downloads `designs_out.zip`, which holds the weights and `training_time.csv`. This is the **final** training time.
