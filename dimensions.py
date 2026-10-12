@@ -63,7 +63,7 @@ def marker_scale(img, side_mm, calib):
         return None
     c = corners[0].reshape(4, 2)
     side_px = np.mean([np.linalg.norm(c[i] - c[(i + 1) % 4]) for i in range(4)])
-    out = dict(mm_per_px_bed=side_mm / side_px)
+    out = dict(mm_per_px_bed=float(side_mm / side_px), marker_px=tuple(c.mean(0)))   # centre: YOLO can box the marker sheet
     if "K" in calib:                                  # image already undistorted -> dist = 0
         obj = np.array([[0, 0, 0], [side_mm, 0, 0], [side_mm, side_mm, 0], [0, side_mm, 0]], np.float32)
         ok, rvec, tvec = cv2.solvePnP(obj, c.astype(np.float32), np.array(calib["K"]), None)
@@ -267,8 +267,10 @@ def measure(img, model, calib, scale_ref=None, laser_on=None, height_mm=None, no
     side = side-camera frame + side_model (height YOLO): its height replaces the laser's when calibrated (side_coef)."""
     img = undistort(img, calib)
     sc = dict(calib)
+    m = marker_scale(img, scale_ref or 1.0, calib)    # looked for even without --scale_ref: a marker is never a block
+    if m:
+        det_kw = dict(det_kw, ignore_pts=[m.pop("marker_px")])
     if scale_ref:
-        m = marker_scale(img, scale_ref, calib)
         if m is None:
             return dict(status="no_marker", message="ArUco marker not found.", warnings=[], blocks=[])
         sc.update(m)
@@ -408,8 +410,9 @@ def selftest():
     scene = img.copy()
     scene[20:220, 20:220] = 255
     scene[40:200, 40:200] = mk[..., None]                           # 160 px marker, say 40 mm -> 0.25 mm/px
-    r = measure(scene, FakeYOLO(boxes), {}, scale_ref=40.0, height_mm=hgt)
-    assert calib_from(r) == marker_scale(scene, 40.0, {}), (calib_from(r), marker_scale(scene, 40.0, {}))
+    r = measure(scene, FakeYOLO(boxes + [[20, 20, 220, 220]]), {}, scale_ref=40.0, height_mm=hgt)  # YOLO boxes the marker
+    assert r["status"] == "ok" and len(r["blocks"]) == 3, (r["status"], [b["box"] for b in r["blocks"]])
+    assert calib_from(r) == calib_from(marker_scale(scene, 40.0, {})), (calib_from(r), marker_scale(scene, 40.0, {}))
     assert abs(calib_from(r)["mm_per_px_bed"] - 0.25) < 0.01, calib_from(r)
     assert calib_from(dict(status="no_marker")) == {}
 

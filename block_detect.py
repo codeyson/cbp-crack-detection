@@ -25,15 +25,17 @@ import cv2
 import numpy as np
 
 
-def detect_blocks(img, model, n_expected=3, conf=0.5, erode_px=6, edge_frac=0.10):
+def detect_blocks(img, model, n_expected=3, conf=0.5, erode_px=6, edge_frac=0.10, ignore_pts=()):
     """Returns {"status", "message", "blocks"}. ALWAYS check status == "ok" before using blocks.
     status: ok | wrong_count | touches_border. Each block: label, box (x1, y1, x2, y2), crop, interior, touches_border.
     interior: the box shrunk on each side by max(erode_px, edge_frac * box side), so side walls, bevels and
     shadows along the edges stay out of the crack measurement. Cracks inside that edge strip are not measured.
+    ignore_pts: (x, y) points, e.g. the ArUco marker centre; a box containing one is not a block.
     ponytail: fixed fraction of the box; exact top-face polygon (needs camera height) if the strip loses real cracks."""
     H, W = img.shape[:2]
     boxes = np.asarray(model.predict(img, conf=conf, verbose=False)[0].boxes.xyxy.cpu()).round().astype(int)
     boxes = sorted((tuple(np.clip(b, 0, [W, H, W, H])) for b in boxes), key=lambda b: b[0])  # left to right
+    boxes = [b for b in boxes if not any(b[0] <= x <= b[2] and b[1] <= y <= b[3] for x, y in ignore_pts)]
     names = ["Left", "Middle", "Right"] if n_expected == 3 and len(boxes) == 3 else [f"Block {i + 1}" for i in range(len(boxes))]
     blocks = []
     for name, (x1, y1, x2, y2) in zip(names, boxes):
