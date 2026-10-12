@@ -7,10 +7,10 @@ Each design is a deep-learning image classifier. It takes one block crop and out
 | Design | Model | Size | Architecture family | Built for |
 |---|---|---|---|---|
 | D1 | MobileNetV3-Large | 4.2M params, 224 px | Depthwise-separable, NAS-designed | Speed on mobile CPUs |
-| D2 | EfficientNet-B0, slim | 2.9M params, 160 px | Compound-scaled MBConv; stage 7 and the 1280-channel head removed | Speed and memory |
-| D3 | ResNet18, slim | 2.8M params, 224 px | Residual blocks; last stage (layer4) removed | Speed and memory |
+| D2 | EfficientNet-B0 | 4.0M params, 192 px | Compound-scaled MBConv | Accuracy per parameter |
+| D3 | ResNet18 | 11.2M params, 192 px | Residual blocks | Classic, simple baseline |
 
-Params are with the 3-class head. D2 and D3 were slimmed to compete with D1 on inference time and memory. Each design's input size is the largest that keeps it about as fast as D1 on the rig CPU (untrained, real crops): D1 24.0 ms, D2 25.0 ms, D3 21.2 ms. See `designs.py`.
+Params are with the 3-class head. All three are the full torchvision architectures. A slimmed D2/D3 (layers removed) was tried first: it matched D1 on speed but lost accuracy, mostly on grade C. D2 and D3 run at 192 px instead of 224 px to stay close to D1 on speed (CPU, untrained, real crops): D1 23.2 ms, D2 29.5 ms, D3 25.0 ms. See `designs.py`.
 
 All three start from ImageNet weights and are fine-tuned on our crops (transfer learning). The code is in [designs.py](designs.py).
 
@@ -31,7 +31,7 @@ Why these three:
 | Sustainability | Maintainability Index | `radon` on the design's source code: `designs.py` plus its torchvision architecture file, weighted by lines of code | highest | `evaluate.py` |
 
 Rules that keep it fair:
-- Same dataset split, epochs, batch size, and seed for every design. Input size is per design (`designs.IMGSZ`: D1 224, D2 160, D3 224 px).
+- Same dataset split, epochs, batch size, and seed for every design. Input size is per design (`designs.IMGSZ`: D1 224, D2 192, D3 192 px).
 - Training runs in Colab on the same GPU type. The GPU name is saved with the result.
 - Downloading the ImageNet weights is not counted in training time.
 - Final inference runs on the MiniPC (the rig computer), one design per run, with other apps closed. The first 5 predictions (warm-up) and reading the image from disk are not timed.
