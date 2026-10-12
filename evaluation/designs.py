@@ -16,9 +16,11 @@ D2 192 px 29.5 ms, D3 192 px 25.0 ms.
     predict = load("d1", "models/d1_mobilenet_v3_large.pth")
     predict(cv2.imread("crop.png"))                               # -> "A"
 
-Maintainability of a design = this file + its torchvision architecture file (see source_files()).
+Maintainability of a design = this file + the part of its torchvision architecture file it uses (see source_code()).
 """
+import ast
 import os
+import sys
 
 import cv2
 import torch
@@ -98,6 +100,31 @@ def load(design, weights=None, imgsz=None):
     return predict
 
 
-def source_files(design):
-    """The code a future researcher maintains for this design: our code + the architecture's implementation."""
-    return [os.path.abspath(__file__), os.path.join(os.path.dirname(torchvision.models.__file__), SOURCE[design])]
+def source_code(design):
+    """The code a future researcher maintains for this design: [this file, the used part of its torchvision file].
+    Used = every top-level class/function of the torchvision file with a line that runs while the model is built and
+    predicts once, plus the imports. The rest of the file (other family members, e.g. ResNet50-152 in resnet.py, and
+    the pretrained-weight metadata classes) is left out."""
+    arch = os.path.join(os.path.dirname(torchvision.models.__file__), SOURCE[design])
+    ran = set()
+
+    def trace(frame, event, arg):
+        if frame.f_code.co_filename == arch:
+            ran.add(frame.f_lineno)
+            return trace
+
+    sys.settrace(trace)
+    try:
+        with torch.no_grad():
+            build(design, pretrained=False).eval()(torch.zeros(1, 3, IMGSZ[design], IMGSZ[design]))
+    finally:
+        sys.settrace(None)
+    with open(arch, encoding="utf-8") as f:
+        src = f.read()
+    lines, used = src.splitlines(), []
+    for node in ast.parse(src).body:
+        start = min([node.lineno] + [d.lineno for d in getattr(node, "decorator_list", [])])
+        if isinstance(node, (ast.Import, ast.ImportFrom)) or any(start <= n <= node.end_lineno for n in ran):
+            used.append("\n".join(lines[start - 1:node.end_lineno]))
+    with open(__file__, encoding="utf-8") as f:
+        return [f.read(), "\n\n".join(used)]

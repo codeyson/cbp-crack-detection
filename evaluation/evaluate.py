@@ -21,7 +21,8 @@ Self-test (fake data, a few minutes on CPU):
 Misclassification Rate (%) = (1 - accuracy_score) x 100        on dataset/test, first cycle
 Average Inference Time (s) = mean of perf_counter() around every predict() call
 Average Memory Usage (%)   = mean of psutil memory_percent() after every predict(), over all cycles
-Maintainability Index      = radon mi_visit() of the design's source files (designs.source_files), SLOC-weighted
+Maintainability Index      = radon mi_visit() of designs.py + the used part of the torchvision file (designs.source_code),
+                             SLOC-weighted
 Training Time (s)          = from results/training_time.csv (train.py)
 """
 import argparse
@@ -59,11 +60,9 @@ def test_items(data):
 
 
 def maintainability(design):
-    """Maintainability Index of all the design's source files, weighted by source lines of code."""
+    """Maintainability Index of the design's source code (designs.source_code), weighted by source lines of code."""
     mis, slocs = [], []
-    for path in designs.source_files(design):
-        with open(path, encoding="utf-8") as f:
-            code = f.read()
+    for code in designs.source_code(design):
         mis.append(mi_visit(code, multi=True))
         slocs.append(analyze(code).sloc)
     return sum(m * s for m, s in zip(mis, slocs)) / sum(slocs)
@@ -146,6 +145,9 @@ def selftest():
     assert all(r["weights"] == "untrained" for r in csv.DictReader(open(os.path.join(results, "provisional", "evaluation.csv"))))
     assert all(r["weights"] != "untrained" for r in csv.DictReader(open(os.path.join(results, "evaluation.csv"))))
     assert sorted(tradeoff.run(results, plots=False)["ranked"]) == sorted(DESIGNS)
+    used = designs.source_code("d3")[1]                                   # only what resnet18 runs
+    assert "class BasicBlock" in used and "def resnet18" in used, used[:200]
+    assert "class Bottleneck" not in used and "def resnet50" not in used
     print("selftest: ALL PASS")
 
 

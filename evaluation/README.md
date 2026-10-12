@@ -28,14 +28,14 @@ Why these three:
 | Performance | Average inference time (s) | `time.perf_counter()` around every prediction | lowest | `evaluate.py` |
 | Efficiency | Average memory usage (%) | `psutil` `memory_percent()` after every prediction, averaged over 20 runs | lowest | `evaluate.py` |
 | Manufacturability | Training time (s) | `time.perf_counter()` before and after training | lowest | `train.py` |
-| Sustainability | Maintainability Index | `radon` on the design's source code: `designs.py` plus its torchvision architecture file, weighted by lines of code | highest | `evaluate.py` |
+| Sustainability | Maintainability Index | `radon` on the design's source code: `designs.py` plus the part of its torchvision architecture file it uses, weighted by lines of code | highest | `evaluate.py` |
 
 Rules that keep it fair:
 - Same dataset split, epochs, batch size, and seed for every design. Input size is per design (`designs.IMGSZ`: D1 224, D2 192, D3 192 px).
 - Training runs in Colab on the same GPU type. The GPU name is saved with the result.
 - Downloading the ImageNet weights is not counted in training time.
 - Final inference runs on the MiniPC (the rig computer), one design per run, with other apps closed. The first 5 predictions (warm-up) and reading the image from disk are not timed.
-- Radon measures the code a future researcher would read to change a design: our `designs.py` (the same for all three) plus that model's torchvision file (`mobilenetv3.py`, `efficientnet.py` or `resnet.py`).
+- Radon measures the code a future researcher would read to change a design: our `designs.py` (the same for all three) plus the used part of that model's torchvision file (`mobilenetv3.py`, `efficientnet.py` or `resnet.py`). Used = every top-level class or function with a line that runs while the model is built and predicts once, plus the imports (`designs.source_code`).
 
 Outputs go to `evaluation/results/`:
 - `training_time.csv`
@@ -172,7 +172,7 @@ How to read the output:
 
 ## Notes for the paper
 
-- Each torchvision architecture file holds the whole model family. For example, `resnet.py` has ResNet18 through ResNet152, and `efficientnet.py` has B0–B7 and V2. Say this when you report the Maintainability Index.
+- Each torchvision architecture file holds the whole model family. For example, `resnet.py` has ResNet18 through ResNet152, and `efficientnet.py` has B0–B7 and V2. The Maintainability Index counts only the classes and functions the design runs, so the other family members do not count against it. Shared config functions (`_mobilenet_v3_conf`, `_efficientnet_conf`) are kept whole, including their branches for the other variants. Say this when you report the Maintainability Index.
 - All three designs use identical augmentation (random resized crop and flips), optimizer (Adam, lr 0.001), epochs, image size and batch size.
 - `confusion_<design>.csv` shows which grades get mixed up. Panels usually ask for it.
 - Report the hardware with the results:
