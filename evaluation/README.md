@@ -124,8 +124,8 @@ Run all commands from the repo folder, with the venv active.
     pip install -r requirements.txt -r evaluation/requirements.txt
     ```
 
-    - Unzip `designs_out.zip` in the repo folder. The weights land in `models/` and `training_time.csv` in `evaluation/results/`.
-    - Copy `dataset/test` from the laptop to `dataset/test` on the MiniPC. Only the test split is needed.
+    - Run `python download_models.py`. It fetches the 3 design weights into `models/` and the test split into `dataset/test` (GitHub Release `designs-v1`). `evaluation/results/training_time.csv` is in git.
+    - After a new training run instead: unzip `designs_out.zip` in the repo folder, copy `dataset/test` over, commit the new `training_time.csv`, and upload the 3 `.pth` files and `dataset_test.zip` (`python -c "import shutil; shutil.make_archive('dataset_test', 'zip', '.', 'dataset/test')"`) to a new Release, then change `designs-v1` in `download_models.py`.
 11. On the MiniPC, plug in the power, close other apps, and run each design. These are the **final** misclassification, inference time and memory values:
 
     ```bash

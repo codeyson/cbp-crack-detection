@@ -19,6 +19,9 @@ On macOS/Linux activate with `source venv/bin/activate`. `download_models.py` pu
 - `models/best.pt`: block detector, the default everywhere
 - `models/STABLE_block_yolov8n_best.pt`: older block detector, use with `--weights models/STABLE_block_yolov8n_best.pt`
 - `models/unet_efficientnet-b0_best.pth`: crack model
+- `models/height_detection.pt`: side-camera height detector
+- `models/d1_mobilenet_v3_large.pth`, `d2_efficientnet_b0.pth`, `d3_resnet18.pth`: the 3 evaluation designs
+- `dataset/test/`: the frozen evaluation test set (871 crops)
 
 Every script uses these paths by default, so `--weights` and `--ckpt` are only needed for other files.
 

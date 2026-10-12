@@ -11,8 +11,10 @@ __pycache__/
 calib.json
 /dataset
 /raw
-/evaluation/results
+/evaluation/results/*
+!/evaluation/results/training_time.csv
 /crops
 /crops_raw
 /height detection*/
 /dataset.zip
+/dataset_test.zip

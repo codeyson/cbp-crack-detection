@@ -1,0 +1,4 @@
+design,model,training_time_s,epochs,imgsz,batch,n_train,hardware,device,weights,when
+d1,mobilenet_v3_large,696.97,30,224,32,4066,Tesla T4,77b295128ea3,models/d1_mobilenet_v3_large.pth,2026-10-12T09:36:37
+d2,efficientnet_b0,585.78,30,160,32,4066,Tesla T4,77b295128ea3,models/d2_efficientnet_b0.pth,2026-10-12T09:46:30
+d3,resnet18,630.65,30,224,32,4066,Tesla T4,77b295128ea3,models/d3_resnet18.pth,2026-10-12T09:57:05
