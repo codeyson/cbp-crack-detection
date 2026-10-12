@@ -112,7 +112,7 @@ Run all commands from the repo folder, with the venv active.
 ### Part C: Final evaluation
 
 9. Train in Colab:
-   - Zip the dataset (`tar -a -c -f dataset.zip dataset`, built into Windows) and upload `dataset.zip` to Google Drive at `MyDrive/cbp/dataset.zip`. One zip uploads much faster than thousands of files.
+   - Zip the dataset (`python -c "import shutil; shutil.make_archive('dataset', 'zip', '.', 'dataset')"`) and upload `dataset.zip` to Google Drive at `MyDrive/cbp/dataset.zip`. One zip uploads much faster than thousands of files.
    - Open `evaluation/train_designs.ipynb` in Colab and pick the T4 GPU.
    - Run all cells. It trains D1, D2 and D3 with the same settings.
    - It downloads `designs_out.zip`, which holds the weights and `training_time.csv`. This is the **final** training time.
