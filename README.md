@@ -33,7 +33,7 @@ Three blocks are placed on the rig at a time. Then:
 | Finding the 3 blocks and cropping them | Working |
 | Measuring length, width and height | Working, needs calibration on the real rig |
 | Crack detection and crack length | Working, but **not yet reliable on pavers** (see below) |
-| Weight from load cells | Built (ESP32-S3 firmware + `loadcell.py`), needs tare/calibration on the real rig |
+| Weight from load cells | Built (ESP32-S3 firmware + `loadcell.py`), calibrated in the sketch |
 | Grading (A/B/C/Reject) | Not built yet. Crack-length thresholds still need to be agreed |
 | One-button run of the whole process (`pipeline.py`) | Working (no grading yet) |
 | Mix formula recommendation | Out of scope for this repo |
@@ -57,8 +57,8 @@ Three blocks are placed on the rig at a time. Then:
 | `dimensions.py` | Measures length, width and height; calibration tools |
 | `infer.py` | Runs the crack model on a block image |
 | `crack_length.py` | Turns a crack mask into a length |
-| `loadcell.py` | Reads the 3 block weights from the ESP32-S3; tare and calibration |
-| `firmware/loadcells/` | ESP32-S3 sketch for the 3 load cells (HX711), with the wiring guide |
+| `loadcell.py` | Reads the 3 block weights streamed by the ESP32-S3 |
+| `firmware/loadcells/` | ESP32-S3 sketch for the 3 load cells (HX711), calibration constants inside |
 | `train_block_yolov8.ipynb` | Trains the block detector (Google Colab) |
 | `crack_pretrain_unet.ipynb` | Trains the crack model (Google Colab) |
 | `evaluation/` | Compares 3 classifier designs against the thesis design constraints. Guide: [evaluation/README.md](evaluation/README.md) |

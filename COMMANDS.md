@@ -138,28 +138,25 @@ Output: `*_dims.png` (outline, L/W/H, pass/fail) and `*_dims.json`. `bad_outline
 ## 1.2 Weight: load cells (`firmware/loadcells/`, `loadcell.py`)
 
 One load cell per block position (Left, Middle, Right), 3x HX711, ESP32-S3, USB cable to the PC.
-Wiring and pins: top of `firmware/loadcells/loadcells.ino`.
+Firmware: `firmware/loadcells/hx711_monitor.ino`. Pins (DT / SCK): Left 5 / 4, Middle 7 / 6, Right 16 / 15.
+It streams `DATA,<left_kg>,<middle_kg>,<right_kg>` every 250 ms (`NA` = that HX711 gives no reading).
 
 Flash the ESP32-S3 (once):
 
 1. Arduino IDE: install the "esp32" boards (Espressif) and the library "HX711" by Bogdan Necula.
-2. Open `firmware/loadcells/loadcells.ino`, board "ESP32S3 Dev Module". Using the board's native USB port: Tools -> USB CDC On Boot: Enabled.
+2. Open `firmware/loadcells/hx711_monitor.ino`, board "ESP32S3 Dev Module". Using the board's native USB port: Tools -> USB CDC On Boot: Enabled.
 3. Upload. Close the Serial Monitor before running the Python commands (only one program can hold the port).
 
 Find the port: Device Manager -> Ports (COM5 etc.) on Windows, `/dev/ttyACM0` on Linux.
 
-Tare and calibrate (once, and again if a cell or platform is moved). Values are saved on the ESP32:
+Tare and calibration are the `OFFSETS` and `CALIBRATION_FACTORS` constants in the sketch (already calibrated).
+Redo them and re-upload if a cell or platform is moved. Check the weights:
 
 ```bash
-python loadcell.py --port COM5 --tare
-python loadcell.py --port COM5 --cal 0 --known 1000
-python loadcell.py --port COM5 --cal 1 --known 1000
-python loadcell.py --port COM5 --cal 2 --known 1000
 python loadcell.py --port COM5
 ```
 
-`--tare` with all platforms empty. `--cal 0/1/2` (Left/Middle/Right) with a mass of known weight in grams on that cell only.
-The last command prints the 3 weights: check them against a kitchen scale.
+It prints the 3 weights in grams: check them against a kitchen scale.
 
 ## 1.3 Crack segmentation: `infer.py`
 
