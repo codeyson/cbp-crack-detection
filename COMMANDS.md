@@ -144,7 +144,7 @@ It streams `DATA,<left_kg>,<middle_kg>,<right_kg>` every 250 ms (`NA` = that HX7
 Flash the ESP32-S3 (once):
 
 1. Arduino IDE: install the "esp32" boards (Espressif) and the library "HX711" by Bogdan Necula.
-2. Open `firmware/loadcells/hx711_monitor.ino`, board "ESP32S3 Dev Module". Using the board's native USB port: Tools -> USB CDC On Boot: Enabled.
+2. Open `firmware/loadcells/hx711_monitor.ino`, board "ESP32S3 Dev Module". Tools -> USB CDC On Boot must match the USB-C port the PC uses: **Disabled** for the "COM"/UART port (CH343, shows as "USB-Enhanced-SERIAL CH343"), **Enabled** for the native "USB" port. Wrong setting: the port opens but no `DATA` lines arrive ("does not stream like the ESP32").
 3. Upload. Close the Serial Monitor before running the Python commands (only one program can hold the port).
 
 Find the port: Device Manager -> Ports (COM5 etc.) on Windows, `/dev/ttyACM0` on Linux.
