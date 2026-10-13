@@ -125,6 +125,8 @@ def draw(res):
     row = 4 if res["dims"] else 1                                     # below the text the draw function wrote
     for b in res["blocks"]:
         lines = [f"Grade {b['grade']}"] if "grade" in b else []
+        if b.get("weight_g") is not None:
+            lines.append(f"{b['weight_g']:.0f} g")
         if "crack_px" in b:
             t = f"crack {b['crack_mm']:.1f} mm" if b["crack_mm"] is not None else f"crack {b['crack_px']:.0f} px"
             lines.append(f"{t} ({b['crack_pieces']} pcs)")
@@ -188,6 +190,7 @@ def save(res, off, laser_on, out, meta):
         cv2.imwrite(f"{d}/side.png", res["side"]["image"])
         cv2.imwrite(f"{d}/side_overlay.png", draw_side(res["side"]["image"], res["side"]))
     cv2.imwrite(f"{d}/overlay.png", draw(res))
+    cv2.imwrite(f"{d}/table.png", draw_table(res))
     keep = ("label", "L_mm", "W_mm", "H_mm", "H_source", "shift_px", "side_px", "fill", "tolerance", "reasons",
             "crack_mm", "crack_px", "crack_pieces", "crack_mm_per_px", "weight_g", "class_grade", "grade_patches", "grade")
     blocks = []
@@ -198,15 +201,35 @@ def save(res, off, laser_on, out, meta):
     with open(f"{d}/summary.json", "w") as f:
         json.dump(dict(meta, status=res["status"], message=res["message"], warnings=res["warnings"],
                        timings=res["timings"], blocks=blocks), f, indent=1, default=float)
+    log_csv(out, d, blocks)
     for b in blocks:
         side = f" (side {b['side_px']:.1f} px)" if b["side_px"] is not None else ""
-        wt = f"  {b['weight_g']} g" if b["weight_g"] is not None else ""
+        wt = f"  {b['weight_g']} g" if b["weight_g"] is not None else "  weight -"
         print(f"  {b['label']}: L {b['L_mm']}  W {b['W_mm']}  H {b['H_mm']}{side}{wt}  {b['tolerance']}  "
               f"crack {b['crack_mm'] if b['crack_mm'] is not None else str(round(b['crack_px'])) + ' px'}"
               f" ({b['crack_pieces']} pcs)  grade {b['grade'] or '-'}")
     for w in res["warnings"]:
         print("  WARNING:", w)
     print(f"timings {res['timings']} -> {d}")
+
+
+CSV_COLS = ("capture", "label", "L_mm", "W_mm", "H_mm", "H_source", "side_px", "weight_g", "tolerance", "crack_mm",
+            "crack_px", "grade", "reasons")
+
+
+def log_csv(out, d, blocks):
+    """One row per block in <out>/results.csv, appended every capture: all captures in one sheet."""
+    import csv
+    p = os.path.join(out, "results.csv")
+    new = not os.path.exists(p)
+    with open(p, "a", newline="") as f:
+        w = csv.writer(f)
+        if new:
+            w.writerow(CSV_COLS)
+        for b in blocks:
+            row = dict(b, capture=os.path.basename(d), reasons="; ".join(b.get("reasons") or []))
+            w.writerow(["" if row.get(k) is None else round(row[k], 2) if isinstance(row[k], float) else row[k]
+                        for k in CSV_COLS])
 
 
 def run_camera(cam, out, meta, side_cam=None, scale=None, **kw):
@@ -354,11 +377,19 @@ def selftest():
 
     d = tempfile.mkdtemp()                                            # what is saved after a capture
     save(r, img, None, d, {})
-    d = os.path.join(d, os.listdir(d)[0])
+    d = os.path.join(d, next(n for n in os.listdir(d) if n != "results.csv"))
     with open(f"{d}/summary.json") as f:
         saved = json.load(f)["blocks"]
     assert all(abs(b["side_px"] - 250) < 3 for b in saved), saved
     assert "weight_g" in saved[0] and "grade" in saved[0]
+    assert os.path.exists(f"{d}/table.png")
+    r = run(img, yolo, dark, dict(mm_per_px_bed=0.5), weights=w)      # weight lands in results.csv
+    save(r, img, None, os.path.dirname(d), {})
+    import csv
+    with open(os.path.join(os.path.dirname(d), "results.csv")) as f:
+        rows = list(csv.DictReader(f))
+    assert [x["weight_g"] for x in rows[-3:]] == ["1000.0", "1200.0", "990.0"], rows[-3:]
+    assert rows[0]["weight_g"] == "" and len(rows) == 6               # the first save had no load cells
     assert os.path.exists(f"{d}/side.png") and os.path.exists(f"{d}/side_overlay.png")
     print("selftest: ALL PASS")
 
@@ -445,13 +476,15 @@ def main():
     on = cv2.imread(a.laser_on) if a.laser_on else None
     side = cv2.imread(a.side_img) if a.side_img else None
     assert a.side_img is None or side is not None, f"could not read {a.side_img}"
-    weights = None
+    weights, werr = None, None
     if scale is not None:
         try:
             weights = read_weights(scale)
         except ScaleError as e:
-            print("WARNING:", e)
+            werr = f"no weight: {e}"
     res = run(off, laser_on=on, side=side, weights=weights, **kw)
+    if werr:
+        res["warnings"].append(werr)
     if res["status"] != "ok":
         print(f"{res['status']}: {res['message']}  {res['warnings']}")
         raise SystemExit(1)
