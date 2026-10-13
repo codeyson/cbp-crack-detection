@@ -8,7 +8,6 @@ __pycache__/
 /pipeline_out
 /blocks_out
 /dims_out
-calib.json
 /dataset
 /raw
 /evaluation/results/*
