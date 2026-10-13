@@ -6,7 +6,6 @@ Live:     python pipeline_ui.py --cam 0 --side_cam 1 --calib calib.json --scale 
 Photos:   python pipeline_ui.py --img off.png --side_img side.png --calib calib.json --height_mm 55
 
 SPACE / Capture: run everything on the current frames (top + side + load cells), save if 3 blocks are found.
-L / Laser: rerun the last capture with the current top frame as the laser-ON frame.
 R / Live: back to the live view after a capture.   Q / Esc: quit.
 """
 import argparse
@@ -152,7 +151,6 @@ class App:
         self.model_lock = threading.Lock()            # YOLO models are shared by the preview and the capture
         self.det, self.side_det = None, None          # latest preview detections (on PREVIEW_W frames)
         self.busy, self.frozen, self.alive = False, False, True
-        self.last = None                              # (off, side, weights, werr) of the last capture, for L
         self.saved_dir = None
         self.results = queue.Queue()
         self._build(setup_text)
@@ -193,7 +191,7 @@ class App:
         left = tk.Frame(bottom, bg=BG)
         left.pack(side="left", fill="both", expand=True)
         cols = [("block", "Block", 110), ("L", "L (mm)", 100), ("W", "W (mm)", 100), ("H", "H (mm)", 110),
-                ("wt", "Weight (g)", 120), ("crack", "Crack", 160), ("result", "Result", 140), ("grade", "Grade", 100)]
+                ("wt", "Weight (g)", 120), ("result", "Result", 140), ("grade", "Grade", 100)]
         self.table = ttk.Treeview(left, columns=[c for c, _, _ in cols], show="headings", height=3, selectmode="none")
         for c, h, w in cols:
             self.table.heading(c, text=h)
@@ -215,15 +213,12 @@ class App:
         self.b_cap.pack(fill="x")
         row = tk.Frame(right, bg=BG)
         row.pack(fill="x", pady=(8, 0))
-        self.b_laser = tk.Button(row, text="Laser [L]", bg="#374151", fg=FG, activebackground="#4b5563",
-                                 command=self.laser, **btn)
-        self.b_laser.pack(side="left", expand=True, fill="x")
         self.b_live = tk.Button(row, text="Live [R]", bg="#374151", fg=FG, activebackground="#4b5563",
                                 command=self.resume, **btn)
-        self.b_live.pack(side="left", expand=True, fill="x", padx=(8, 0))
-        self.b_open = tk.Button(right, text="Open last capture folder", bg="#374151", fg=FG,
+        self.b_live.pack(side="left", expand=True, fill="x")
+        self.b_open = tk.Button(row, text="Open folder", bg="#374151", fg=FG,
                                 activebackground="#4b5563", command=self.open_folder, **btn)
-        self.b_open.pack(fill="x", pady=(8, 0))
+        self.b_open.pack(side="left", expand=True, fill="x", padx=(8, 0))
         tk.Label(right, text=setup_text, bg=BG, fg=MUTED, font=("Consolas", 9), justify="left",
                  anchor="w").pack(fill="x", pady=(10, 0))
 
@@ -234,7 +229,7 @@ class App:
         self.status_lbl = tk.Label(bar, text="Live", bg=PANEL, fg=MUTED, font=("Segoe UI", 11), anchor="e", padx=12)
         self.status_lbl.pack(side="right")
 
-        for keys, fn in ((("<space>",), self.capture), (("l", "L"), self.laser), (("r", "R"), self.resume),
+        for keys, fn in ((("<space>",), self.capture), (("r", "R"), self.resume),
                          (("q", "Q", "<Escape>"), self.quit)):
             for k in keys:
                 r.bind(k, lambda e, fn=fn: fn())
@@ -321,33 +316,20 @@ class App:
         off = self.top.latest()
         side = self.side.latest() if self.side is not None else None
         weights, werr = self.scale.capture() if self.scale is not None else (None, None)
-        self.last = (off, side, weights, werr)
-        self._start(off, side, None, weights, werr)
-
-    def laser(self):
-        if self.busy:
-            return
-        if self.last is None:
-            self._status("Press SPACE (laser off) first", AMBER)
-            return
-        off, side, weights, werr = self.last
-        self._start(off, side, self.top.latest(), weights, werr)
-
-    def _start(self, off, side, on, weights, werr):
         self.busy, self.frozen = True, True
         self.b_cap.configure(state="disabled", text="Measuring...")
         self._status("Running pipeline: detection, dimensions, height, crack, grade ...", BLUE)
-        threading.Thread(target=self._job, args=(off, side, on, weights, werr), daemon=True).start()
+        threading.Thread(target=self._job, args=(off, side, weights, werr), daemon=True).start()
 
-    def _job(self, off, side, on, weights, werr):
+    def _job(self, off, side, weights, werr):
         try:
             with self.model_lock:
-                res = pipeline.run(off, laser_on=on, side=side, weights=weights, **self.kw)
+                res = pipeline.run(off, side=side, weights=weights, **self.kw)
             if werr:
                 res["warnings"].append(werr if weights else f"no weight: {werr}")
             saved = None
             if res["status"] == "ok":
-                pipeline.save(res, off, on, self.out, self.meta)      # same files + results.csv as pipeline.py
+                pipeline.save(res, off, None, self.out, self.meta)    # same files + results.csv as pipeline.py
                 dirs = [d for d in glob.glob(os.path.join(self.out, "*")) if os.path.isdir(d)]
                 saved = max(dirs, key=os.path.getmtime) if dirs else None
             else:
@@ -387,17 +369,12 @@ class App:
         for b in res["blocks"]:
             tol = b.get("tolerance")
             result = {"pass": "PASS", "fail": "FAIL", None: "-"}.get(tol, tol)
-            if "crack_px" in b:
-                crack = (f"{b['crack_mm']:.1f} mm" if b.get("crack_mm") is not None else f"{b['crack_px']:.0f} px") \
-                    + f" ({b['crack_pieces']})"
-            else:
-                crack = "-"
             grade = b.get("grade", "-")
             tag = "fail" if tol == "fail" or grade == "Reject" else "pass" if tol == "pass" else \
                 "none" if tol is None else "other"
             self.table.insert("", "end", tags=(tag,), values=(
                 b["label"], fmt(b.get("L_mm")), fmt(b.get("W_mm")), pipeline.h_cell(b, res), fmt(b.get("weight_g")),
-                crack, result, grade))
+                result, grade))
 
         notes = ([f"{res['status']}: {res['message']}  (not saved)"] if res["status"] != "ok" else []) \
             + list(res.get("warnings", []))

@@ -10,7 +10,7 @@ Needs Python 3.11 and git. On Windows:
 git clone https://github.com/codeyson/cbp-crack-detection.git
 cd cbp-crack-detection
 python -m venv venv
-venv\Scriptsctivate
+venv/Scripts/Activate
 pip install -r requirements.txt
 python download_models.py
 ```
