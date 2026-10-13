@@ -17,6 +17,7 @@ Scale: --scale_ref (ArUco in frame) or mm_per_px_bed in --calib. Neither: dims s
 """
 import argparse
 import json
+import textwrap
 import os
 import time
 
@@ -49,6 +50,7 @@ def run(off, model, predict_fn, calib, laser_on=None, scale_ref=None, height_mm=
         if side is not None:                                          # height needs no top-view scale
             res["warnings"] += side_height(res, side, side_model, calib, det_kw.get("conf", 0.5))
     res["timings"] = {"detect_dims_s": round(time.perf_counter() - t0, 3)}
+    res["height_mm"] = height_mm                                      # shown as the assumed H in draw_table
     if weights:
         add_weights(res, weights, nominal_g, tol_g)
     if res["status"] != "ok":
@@ -123,6 +125,8 @@ def draw(res):
     row = 4 if res["dims"] else 1                                     # below the text the draw function wrote
     for b in res["blocks"]:
         lines = [f"Grade {b['grade']}"] if "grade" in b else []
+        if b.get("weight_g") is not None:
+            lines.append(f"{b['weight_g']:.0f} g")
         if "crack_px" in b:
             t = f"crack {b['crack_mm']:.1f} mm" if b["crack_mm"] is not None else f"crack {b['crack_px']:.0f} px"
             lines.append(f"{t} ({b['crack_pieces']} pcs)")
@@ -137,10 +141,15 @@ def draw(res):
 
 
 def draw_table(res):
-    """Results window: one row per block, L/W/H (mm), weight (g), PASS/FAIL. Missing values show "-"."""
+    """Results window: one row per block, L/W/H (mm), weight (g), PASS/FAIL, then why values are missing (status,
+    warnings). H: measured mm, else the uncalibrated side-camera height in px, else --height_mm marked * (assumed)."""
     cols = [("Block", 20), ("L (mm)", 150), ("W (mm)", 270), ("H (mm)", 390), ("Weight (g)", 510), ("Result", 680),
             ("Grade", 830)]
-    img = np.full((70 + 50 * len(res["blocks"]), 960, 3), 255, np.uint8)
+    notes = ([f"{res['status']}: {res['message']}"] if res["status"] != "ok" else []) + list(res.get("warnings", []))
+    if any(h_cell(b, res).endswith("*") for b in res["blocks"]):
+        notes.append(f"H * = assumed --height_mm {res['height_mm']:g}, not measured")
+    notes = [ln for n in notes for ln in textwrap.wrap(n, 95)]
+    img = np.full((70 + 50 * len(res["blocks"]) + 26 * len(notes) + (10 if notes else 0), 960, 3), 255, np.uint8)
     f = lambda v: "-" if v is None else f"{v:.1f}"
     put = lambda t, x, y, col=(0, 0, 0): cv2.putText(img, t, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, col, 2)
     for name, x in cols:
@@ -151,13 +160,24 @@ def draw_table(res):
         tol = b.get("tolerance")
         result, col = {"pass": ("PASS", (0, 160, 0)), "fail": ("FAIL", (0, 0, 220)), None: ("-", (0, 0, 0))}.get(
             tol, (tol, (0, 140, 255)))
-        for t, (_, x) in zip([b["label"], f(b.get("L_mm")), f(b.get("W_mm")), f(b.get("H_mm")), f(b.get("weight_g"))],
+        for t, (_, x) in zip([b["label"], f(b.get("L_mm")), f(b.get("W_mm")), h_cell(b, res), f(b.get("weight_g"))],
                              cols):
             put(t, x, y)
         put(result, cols[-2][1], y, col)
         g = b.get("grade", "-")
         put(g, cols[-1][1], y, {"A": (0, 160, 0), "B": (0, 140, 255), "C": (0, 90, 255), "Reject": (0, 0, 220)}.get(g, (0, 0, 0)))
+    y0 = 70 + 50 * len(res["blocks"])
+    for i, n in enumerate(notes):
+        cv2.putText(img, n, (20, y0 + 26 * i + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 200), 1)
     return img
+
+
+def h_cell(b, res):
+    if b.get("H_mm") is not None:
+        return f"{b['H_mm']:.1f}"
+    if b.get("side_px") is not None:                                  # side camera without --fit_side
+        return f"{b['side_px']:.0f} px"
+    return "-" if res.get("height_mm") is None else f"{res['height_mm']:g}*"
 
 
 def save(res, off, laser_on, out, meta):
@@ -170,6 +190,7 @@ def save(res, off, laser_on, out, meta):
         cv2.imwrite(f"{d}/side.png", res["side"]["image"])
         cv2.imwrite(f"{d}/side_overlay.png", draw_side(res["side"]["image"], res["side"]))
     cv2.imwrite(f"{d}/overlay.png", draw(res))
+    cv2.imwrite(f"{d}/table.png", draw_table(res))
     keep = ("label", "L_mm", "W_mm", "H_mm", "H_source", "shift_px", "side_px", "fill", "tolerance", "reasons",
             "crack_mm", "crack_px", "crack_pieces", "crack_mm_per_px", "weight_g", "class_grade", "grade_patches", "grade")
     blocks = []
@@ -180,15 +201,35 @@ def save(res, off, laser_on, out, meta):
     with open(f"{d}/summary.json", "w") as f:
         json.dump(dict(meta, status=res["status"], message=res["message"], warnings=res["warnings"],
                        timings=res["timings"], blocks=blocks), f, indent=1, default=float)
+    log_csv(out, d, blocks)
     for b in blocks:
         side = f" (side {b['side_px']:.1f} px)" if b["side_px"] is not None else ""
-        wt = f"  {b['weight_g']} g" if b["weight_g"] is not None else ""
+        wt = f"  {b['weight_g']} g" if b["weight_g"] is not None else "  weight -"
         print(f"  {b['label']}: L {b['L_mm']}  W {b['W_mm']}  H {b['H_mm']}{side}{wt}  {b['tolerance']}  "
               f"crack {b['crack_mm'] if b['crack_mm'] is not None else str(round(b['crack_px'])) + ' px'}"
               f" ({b['crack_pieces']} pcs)  grade {b['grade'] or '-'}")
     for w in res["warnings"]:
         print("  WARNING:", w)
     print(f"timings {res['timings']} -> {d}")
+
+
+CSV_COLS = ("capture", "label", "L_mm", "W_mm", "H_mm", "H_source", "side_px", "weight_g", "tolerance", "crack_mm",
+            "crack_px", "grade", "reasons")
+
+
+def log_csv(out, d, blocks):
+    """One row per block in <out>/results.csv, appended every capture: all captures in one sheet."""
+    import csv
+    p = os.path.join(out, "results.csv")
+    new = not os.path.exists(p)
+    with open(p, "a", newline="") as f:
+        w = csv.writer(f)
+        if new:
+            w.writerow(CSV_COLS)
+        for b in blocks:
+            row = dict(b, capture=os.path.basename(d), reasons="; ".join(b.get("reasons") or []))
+            w.writerow(["" if row.get(k) is None else round(row[k], 2) if isinstance(row[k], float) else row[k]
+                        for k in CSV_COLS])
 
 
 def run_camera(cam, out, meta, side_cam=None, scale=None, **kw):
@@ -199,11 +240,12 @@ def run_camera(cam, out, meta, side_cam=None, scale=None, **kw):
 
     def weigh():
         try:
-            return read_weights(scale)
+            return read_weights(scale), None
         except ScaleError as e:
             print("WARNING:", e)
+            return None, str(e)
 
-    live, last, weights = None, 0.0, None
+    live, live_t, last, weights, werr = None, 0.0, 0.0, None, None
     cap, frame = open_camera(cam)
     side_cap, side_frame = open_camera(side_cam) if side_cam is not None else (None, None)
     off, side, ok = None, None, True
@@ -213,7 +255,10 @@ def run_camera(cam, out, meta, side_cam=None, scale=None, **kw):
         pv = cv2.resize(draw_overlay(frame, detect_blocks(frame, **det_kw)), None, fx=fx, fy=fx)
         if scale is not None:
             if time.monotonic() - last > 0.5:                         # poll, not every frame
-                live, last = weigh(), time.monotonic()
+                live, _ = weigh()
+                last = time.monotonic()
+                if live is not None:
+                    live_t = last
             t = "load cells: no reading" if live is None else (
                 f"L {live['Left']:.1f}  M {live['Middle']:.1f}  R {live['Right']:.1f} g  "
                 + ("stable" if live["stable"] else "NOT stable"))
@@ -233,9 +278,14 @@ def run_camera(cam, out, meta, side_cam=None, scale=None, **kw):
             if key == ord(" "):
                 off = frame.copy()
                 side = side_frame.copy() if side_cap is not None else None
-                weights = weigh() if scale is not None else None
+                weights, werr = weigh() if scale is not None else (None, None)
+                age = time.monotonic() - live_t
+                if weights is None and live is not None and age < 2.0:  # one bad read at SPACE: the preview's is fine
+                    weights, werr = live, f"weight from the live reading {age:.1f} s before capture ({werr})"
             on = frame.copy() if key == ord("l") else None
             res = run(off, laser_on=on, side=side, weights=weights, **kw)
+            if werr:
+                res["warnings"].append(werr if weights else f"no weight: {werr}")
             if res["status"] == "ok":
                 save(res, off, on, out, meta)
             else:
@@ -252,6 +302,7 @@ def run_camera(cam, out, meta, side_cam=None, scale=None, **kw):
 
 
 def selftest():
+    import tempfile
     from block_detect import FakeYOLO
 
     rng = np.random.default_rng(0)
@@ -316,17 +367,47 @@ def selftest():
     r = run(img, yolo, dark, {}, side=side, side_model=FakeYOLO(sboxes))                             # side not calibrated
     assert all(b.get("H_mm") is None and abs(b["side_px"] - 250) < 3 for b in r["blocks"])
     assert draw(r).shape == img.shape
+    assert all(h_cell(b, r) == f"{b['side_px']:.0f} px" for b in r["blocks"])   # table shows the px, not "-"
+    t = draw_table(r)                                                # warnings say why: taller than 3 bare rows
+    assert t.shape[0] > 70 + 50 * 3 and any("fit_side" in w for w in r["warnings"]), r["warnings"]
+    r2 = run(img, yolo, dark, dict(mm_per_px_bed=0.5), height_mm=55)  # no side camera: assumed height, marked *
+    assert [h_cell(b, r2) for b in r2["blocks"]] == ["55*"] * 3 and draw_table(r2).ndim == 3
+    from dimensions import load_calib
+    assert load_calib(os.path.join(tempfile.mkdtemp(), "nope.json"), warn=True) == {}
 
-    import tempfile                                                   # what is saved after a capture
-    d = tempfile.mkdtemp()
+    d = tempfile.mkdtemp()                                            # what is saved after a capture
     save(r, img, None, d, {})
-    d = os.path.join(d, os.listdir(d)[0])
+    d = os.path.join(d, next(n for n in os.listdir(d) if n != "results.csv"))
     with open(f"{d}/summary.json") as f:
         saved = json.load(f)["blocks"]
     assert all(abs(b["side_px"] - 250) < 3 for b in saved), saved
     assert "weight_g" in saved[0] and "grade" in saved[0]
+    assert os.path.exists(f"{d}/table.png")
+    r = run(img, yolo, dark, dict(mm_per_px_bed=0.5), weights=w)      # weight lands in results.csv
+    save(r, img, None, os.path.dirname(d), {})
+    import csv
+    with open(os.path.join(os.path.dirname(d), "results.csv")) as f:
+        rows = list(csv.DictReader(f))
+    assert [x["weight_g"] for x in rows[-3:]] == ["1000.0", "1200.0", "990.0"], rows[-3:]
+    assert rows[0]["weight_g"] == "" and len(rows) == 6               # the first save had no load cells
     assert os.path.exists(f"{d}/side.png") and os.path.exists(f"{d}/side_overlay.png")
     print("selftest: ALL PASS")
+
+
+def report_setup(calib, a, use_side, scale):
+    """What this run can measure, before the first capture: a missing calibration otherwise only shows as "-"."""
+    dims = (f"ON (--scale_ref {a.scale_ref:g} mm marker)" if a.scale_ref else
+            f"ON (mm_per_px_bed {calib['mm_per_px_bed']:.4f})" if "mm_per_px_bed" in calib else
+            "OFF: no mm_per_px_bed in the calib file and no --scale_ref (dimensions.py --save_calib)")
+    if use_side and "side_coef" in calib:
+        h = "side camera, calibrated"
+    elif "laser_coef" in calib:
+        h = "laser (press L after SPACE)"
+    else:
+        h = ("side camera NOT calibrated: shows side px only (dimensions.py --fit_side)" if use_side else "not measured")
+        if a.height_mm is not None:
+            h += f"; table shows the assumed --height_mm {a.height_mm:g}*"
+    print(f"setup: L/W {dims}\n       H {h}\n       weight {'on ' + a.scale if scale is not None else 'off (no --scale)'}")
 
 
 def main():
@@ -378,13 +459,14 @@ def main():
     from infer import load_predict_fn
     fn, device = load_predict_fn(a.ckpt, a.backbone, a.threads)
     triple = lambda s: tuple(map(float, s.split(","))) if s else None
-    kw = dict(model=YOLO(a.weights), predict_fn=fn, calib=load_calib(a.calib), scale_ref=a.scale_ref,
+    kw = dict(model=YOLO(a.weights), predict_fn=fn, calib=load_calib(a.calib, warn=True), scale_ref=a.scale_ref,
               height_mm=a.height_mm, nominal=triple(a.nominal), tol=triple(a.tol), thresh=a.thresh,
               conf=a.conf, edge_frac=a.edge_frac, side_model=YOLO(a.side_weights) if use_side else None,
               nominal_g=a.nominal_g, tol_g=a.tol_g, classify=designs.load(a.design, grader) if grader else None)
     meta = dict(weights=os.path.basename(a.weights), ckpt=os.path.basename(a.ckpt), backbone=a.backbone,
                 thresh=a.thresh, edge_frac=a.edge_frac, device=device, design=a.design,
                 **({"side_weights": os.path.basename(a.side_weights)} if use_side else {}))
+    report_setup(kw["calib"], a, use_side, scale)
     if a.cam is not None:
         return run_camera(a.cam, a.out, meta, side_cam=a.side_cam, scale=scale, **kw)
     if not a.img:
@@ -394,13 +476,15 @@ def main():
     on = cv2.imread(a.laser_on) if a.laser_on else None
     side = cv2.imread(a.side_img) if a.side_img else None
     assert a.side_img is None or side is not None, f"could not read {a.side_img}"
-    weights = None
+    weights, werr = None, None
     if scale is not None:
         try:
             weights = read_weights(scale)
         except ScaleError as e:
-            print("WARNING:", e)
+            werr = f"no weight: {e}"
     res = run(off, laser_on=on, side=side, weights=weights, **kw)
+    if werr:
+        res["warnings"].append(werr)
     if res["status"] != "ok":
         print(f"{res['status']}: {res['message']}  {res['warnings']}")
         raise SystemExit(1)
