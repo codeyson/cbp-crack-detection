@@ -4,8 +4,8 @@ const uint8_t SENSOR_COUNT = 3;
 const uint8_t DT_PINS[3] = {5,7,16};
 const uint8_t SCK_PINS[3] = {4,6,15};
 HX711 scales[3];
-const double OFFSETS[3] = {-161669.900,-213026.000,-273475.000};
-const double CALIBRATION_FACTORS[3] = {-430110.900,-431443.000,-430185.800};
+const double OFFSETS[3] = {-157693.250,-215584.800,-270299};
+const double CALIBRATION_FACTORS[3] = {-414196.339,-415572.225,-414115.997}
 long latestRaw[3] = {0,0,0};
 bool hasReading[3] = {false,false,false};
 unsigned long lastReadingMs[3] = {0,0,0};
