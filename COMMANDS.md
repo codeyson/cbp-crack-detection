@@ -201,6 +201,12 @@ python pipeline.py --cam 0 --calib calib.json --scale COM5 --nominal 200,100,60 
 
 (`--nominal_g`/`--tol_g` above are example numbers: use the values from the standard.)
 
+At startup the pipeline prints a `setup:` block saying what it can measure. Below the table, red lines say why a value is missing:
+- H shows `249 px`: the side camera is not calibrated yet. Run `dimensions.py --fit_side` (see 1.2); H is then in mm.
+- H shows `55*`: no measured height, this is `--height_mm` (assumed, not checked against the tolerance).
+- Weight `-`: the load-cell read failed at SPACE (reason in red, e.g. one HX711 gave no reading). A failed read
+  falls back to the preview's reading when that is under 2 s old. Check the cells with `python loadcell.py --port COM5`.
+
 Offline on a saved frame (same code as live):
 
 ```bash
