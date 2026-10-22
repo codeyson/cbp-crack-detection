@@ -2,10 +2,11 @@
 designs.py - the 3 alternative designs: ImageNet-pretrained torchvision classifiers, block crop -> grade A/B/C.
 All three use this same training and prediction code, so only the architecture differs.
 
-    D1 MobileNetV3-Large        4.2M params  224 px  speed-first (depthwise convolutions, NAS-designed)
-    D2 EfficientNet-B0, slim    2.9M params  160 px  stage 7 + 1280-ch head removed, smaller input
-    D3 ResNet18, slim           2.8M params  224 px  last residual stage (layer4) removed
-    (params with the 3-class head)
+    D1 MobileNetV3-Large        4.37M params  224 px  speed-first (depthwise convolutions, NAS-designed)
+    D2 EfficientNet-B0, slim    2.90M params  160 px  stage 7 + 1280-ch head removed, smaller input
+    D3 ResNet18, slim           2.82M params  224 px  last residual stage (layer4) removed
+    (params with the classifier head: the last Linear of each design is replaced by FC 128 + ReLU -> Dropout 0.2 ->
+    Linear 3, see head(); before the head 4.21M / 2.88M / 2.78M)
 
 D2 and D3 were slimmed to compete with D1 on inference time and memory: memory differences between the designs are
 mostly model size, inference time is depth x input size. Input sizes were picked on CPU (untrained, real crops) as
@@ -31,19 +32,26 @@ from torchvision import datasets, models, transforms
 DESIGNS = dict(d1="mobilenet_v3_large", d2="efficientnet_b0", d3="resnet18")
 SOURCE = dict(d1="mobilenetv3.py", d2="efficientnet.py", d3="resnet.py")   # in torchvision/models/
 IMGSZ = dict(d1=224, d2=160, d3=224)                                         # input px per design (see top)
+HIDDEN, DROPOUT = 128, 0.2                                                   # classifier head (see head())
 MEAN, STD = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]                   # ImageNet
+
+
+def head(in_features, n_classes):
+    """Classifier head shared by all designs, replaces the last Linear: FC 128 + ReLU -> Dropout 0.2 -> Linear."""
+    return nn.Sequential(nn.Linear(in_features, HIDDEN), nn.ReLU(inplace=True), nn.Dropout(DROPOUT),
+                         nn.Linear(HIDDEN, n_classes))
 
 
 def build(design, n_classes=3, pretrained=True):
     model = getattr(models, DESIGNS[design])(weights="DEFAULT" if pretrained else None)
     if design == "d2":         # slim: drop stage 7 and the 1280-channel head conv, stage 6 gives 192 channels
         model.features = model.features[:7]
-        model.classifier[-1] = nn.Linear(192, n_classes)
+        model.classifier[-1] = head(192, n_classes)
     elif design == "d3":       # slim: drop the last residual stage, layer3 gives 256 channels
         model.layer4 = nn.Identity()
-        model.fc = nn.Linear(256, n_classes)
-    else:                      # MobileNet: last layer of the classifier
-        model.classifier[-1] = nn.Linear(model.classifier[-1].in_features, n_classes)
+        model.fc = head(256, n_classes)
+    else:                      # MobileNet: after the existing FC 1280 of the classifier
+        model.classifier[-1] = head(model.classifier[-1].in_features, n_classes)
     return model
 
 
