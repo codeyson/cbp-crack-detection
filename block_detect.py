@@ -24,6 +24,9 @@ import time
 import cv2
 import numpy as np
 
+# 2 blocks sit on the Left and Right load cells; Middle stays empty, so the labels still match the cells
+LABELS = {2: ("Left", "Right"), 3: ("Left", "Middle", "Right")}
+
 
 def detect_blocks(img, model, n_expected=3, conf=0.5, erode_px=6, edge_frac=0.10, ignore_pts=()):
     """Returns {"status", "message", "blocks"}. ALWAYS check status == "ok" before using blocks.
@@ -36,7 +39,7 @@ def detect_blocks(img, model, n_expected=3, conf=0.5, erode_px=6, edge_frac=0.10
     boxes = np.asarray(model.predict(img, conf=conf, verbose=False)[0].boxes.xyxy.cpu()).round().astype(int)
     boxes = sorted((tuple(np.clip(b, 0, [W, H, W, H])) for b in boxes), key=lambda b: b[0])  # left to right
     boxes = [b for b in boxes if not any(b[0] <= x <= b[2] and b[1] <= y <= b[3] for x, y in ignore_pts)]
-    names = ["Left", "Middle", "Right"] if n_expected == 3 and len(boxes) == 3 else [f"Block {i + 1}" for i in range(len(boxes))]
+    names = LABELS[n_expected] if n_expected in LABELS and len(boxes) == n_expected else [f"Block {i + 1}" for i in range(len(boxes))]
     blocks = []
     for name, (x1, y1, x2, y2) in zip(names, boxes):
         interior = np.zeros((y2 - y1, x2 - x1), bool)
@@ -159,6 +162,9 @@ def selftest():
     r = detect_blocks(img, FakeYOLO(row))
     assert r["status"] == "ok", r
     assert [b["label"] for b in r["blocks"]] == ["Left", "Middle", "Right"]
+    r2 = detect_blocks(img, FakeYOLO([row[0], row[1]]), n_expected=2)           # 2 blocks: Left and Right, no Middle
+    assert r2["status"] == "ok" and [b["label"] for b in r2["blocks"]] == ["Left", "Right"], r2
+    assert detect_blocks(img, FakeYOLO(row), n_expected=2)["status"] == "wrong_count"
     assert all(b["crop"].shape == (150, 300, 3) for b in r["blocks"])
     assert r["blocks"][0]["interior"].sum() == (150 - 30) * (300 - 60)          # shrunk 10% of each side
     r = detect_blocks(img, FakeYOLO(row), edge_frac=0)

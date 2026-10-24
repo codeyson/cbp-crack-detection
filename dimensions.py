@@ -188,7 +188,7 @@ def fit_laser(csv_path, x_name="shift_px"):
     return coef.tolist()
 
 
-def side_heights(img, model, conf=0.5, flip=False, mid_frac=0.7, search_frac=0.08):
+def side_heights(img, model, conf=0.5, flip=False, mid_frac=0.7, search_frac=0.08, n_expected=3):
     """Side camera (lens about level with the blocks): front-face height in px of each block.
     YOLO (models/height_detection.pt) finds each front face; its box edges are a few px off, so in every column of
     the middle mid_frac of the box the vertical brightness change is averaged across columns (concrete texture
@@ -196,9 +196,10 @@ def side_heights(img, model, conf=0.5, flip=False, mid_frac=0.7, search_frac=0.0
     The top is searched at/below the box top: a lens above the block tops shows a strip of the top face, and its far
     edge (the silhouette) is not the block height. On 28 labelled photos this cut the spread between the 3 blocks of
     one photo from 9.2 to 8.5 px vs the raw box; box_px is kept so calipers can decide (--fit_side on either).
-    flip: the side camera faces the row from the other side, so its left-to-right order is Right, Middle, Left.
+    flip: the side camera faces the row from the other side, so its left-to-right order is Right, Middle, Left
+    (Right, Left with n_expected=2).
     ponytail: lens at about block mid-height removes the top strip and the ambiguity."""
-    res = detect_blocks(img, model, conf=conf)
+    res = detect_blocks(img, model, n_expected=n_expected, conf=conf)
     gray = cv2.GaussianBlur(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), (5, 5), 0)
     gy = np.abs(cv2.Sobel(gray, cv2.CV_32F, 0, 1))
     for b in res["blocks"]:
@@ -228,10 +229,10 @@ def draw_side(img, res):
     return vis
 
 
-def side_height(res, side, side_model, calib, conf=0.5):
+def side_height(res, side, side_model, calib, conf=0.5, n_expected=3):
     """Side-camera height onto res["blocks"], matched by label: side_px, plus H_mm / H_source="side" when side_coef
     is calibrated (--fit_side). Sets res["side"]. Needs no top-view mm scale. Returns warnings."""
-    res["side"] = side_heights(side, side_model, conf=conf, flip=calib.get("side_flip", False))
+    res["side"] = side_heights(side, side_model, conf=conf, flip=calib.get("side_flip", False), n_expected=n_expected)
     warn, px = [], {}
     if res["side"]["status"] != "ok":
         warn.append(f"side camera: {res['side']['message']} Side height not measured.")
@@ -284,7 +285,7 @@ def measure(img, model, calib, scale_ref=None, laser_on=None, height_mm=None, no
         if "laser_coef" not in sc:
             warn.append("laser not calibrated (--fit_laser): height not measured, shift_px only")
     if side is not None:
-        warn += side_height(res, side, side_model, sc, det_kw.get("conf", 0.5))
+        warn += side_height(res, side, side_model, sc, det_kw.get("conf", 0.5), det_kw.get("n_expected", 3))
     if not sc.get("cam_height_mm"):
         warn.append("camera height unknown: no side-wall/height correction, L/W read too large")
     cxy = (np.array(sc["K"])[:2, 2] if "K" in sc else np.array(img.shape[1::-1]) / 2)
@@ -439,6 +440,18 @@ def selftest():
     r = measure(img, FakeYOLO(boxes), calib, height_mm=hgt, side=side, side_model=FakeYOLO(sboxes))
     assert r["blocks"][0]["side_px"] and r["blocks"][0]["H_mm"] is None and any("--fit_side" in w for w in r["warnings"])
     assert draw_side(side, s).shape == side.shape
+
+    # 6. Two blocks (Left, Right; no Middle): top and side views matched by label, flip too
+    r = measure(img, FakeYOLO([boxes[0], boxes[2]]), dict(calib, side_coef=coef), side=side,
+                side_model=FakeYOLO([sboxes[0], sboxes[2]]), n_expected=2)
+    assert r["status"] == "ok" and [b["label"] for b in r["blocks"]] == ["Left", "Right"], r["status"]
+    assert [round(b["H_mm"]) for b in r["blocks"]] == [50, 60], [b["H_mm"] for b in r["blocks"]]
+    r = measure(img, FakeYOLO([boxes[0], boxes[2]]), dict(calib, side_coef=coef, side_flip=True), side=side,
+                side_model=FakeYOLO([sboxes[0], sboxes[2]]), n_expected=2)
+    assert [b["label"] for b in r["side"]["blocks"]] == ["Right", "Left"]
+    assert [round(b["H_mm"]) for b in r["blocks"]] == [60, 50], [b["H_mm"] for b in r["blocks"]]
+    assert measure(img, FakeYOLO(boxes), calib, height_mm=hgt, n_expected=2)["status"] == "wrong_count"
+    assert side_heights(side, FakeYOLO(sboxes), n_expected=2)["status"] == "wrong_count"
     print("selftest: ALL PASS")
 
 
@@ -457,6 +470,7 @@ def main():
     ap.add_argument("--nominal", help="L,W,H mm, e.g. 200,100,60 (from the standard)")
     ap.add_argument("--tol", help="L,W,H tolerance mm, e.g. 1.6,1.6,3.2 (from the standard)")
     ap.add_argument("--conf", type=float, default=0.5)
+    ap.add_argument("--n_blocks", type=int, default=3, choices=(2, 3), help="blocks on the rig: 3 = Left, Middle, Right; 2 = Left, Right")
     ap.add_argument("--out", default="dims_out")
     ap.add_argument("--calibrate_camera", metavar="DIR")
     ap.add_argument("--board", default="9x6", help="checkerboard INNER corners, cols x rows")
@@ -485,7 +499,7 @@ def main():
     assert a.side_img is None or side is not None, f"could not read {a.side_img}"
     side_model = YOLO(a.side_weights) if a.side_img else None
     if a.side_img and not a.img:   # calibration: side photo only
-        s = side_heights(side, side_model, conf=a.conf, flip=calib.get("side_flip", False))
+        s = side_heights(side, side_model, conf=a.conf, flip=calib.get("side_flip", False), n_expected=a.n_blocks)
         os.makedirs(a.out, exist_ok=True)
         stem = os.path.splitext(os.path.basename(a.side_img))[0]
         cv2.imwrite(f"{a.out}/{stem}_side.png", draw_side(side, s))
@@ -495,7 +509,7 @@ def main():
         print(f"{s['status']}: {s['message'] or 'ok'} -> {a.out}/{stem}_side.png")
         raise SystemExit(0 if s["status"] == "ok" else 1)
     kw = dict(model=YOLO(a.weights), calib=calib, scale_ref=a.scale_ref, height_mm=a.height_mm,
-              nominal=triple(a.nominal), tol=triple(a.tol), conf=a.conf)
+              nominal=triple(a.nominal), tol=triple(a.tol), conf=a.conf, n_expected=a.n_blocks)
     if not a.img:
         ap.error("--img is required")
     img = cv2.imread(a.img)

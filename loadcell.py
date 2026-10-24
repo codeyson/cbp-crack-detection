@@ -20,7 +20,7 @@ class ScaleError(Exception):
     pass
 
 
-def open_scale(port, baud=115200):
+def open_scale(port, baud=115200, need=LABELS):
     """Opens the port and checks that a DATA line arrives (opening the port may reset the ESP32: a few tries)."""
     try:
         ser = serial.Serial(port, baud, timeout=1)
@@ -28,32 +28,36 @@ def open_scale(port, baud=115200):
         raise ScaleError(f"load cells: cannot open {port}: {e}") from e
     for i in range(3):
         try:
-            read_weights(ser)
+            read_weights(ser, need)
             return ser
         except ScaleError as e:
             err = e
     raise ScaleError(f"load cells: {port} opened but does not stream like the ESP32 ({err})")
 
 
-def _parse(line):
-    """'DATA,kg,kg,kg' -> [g, g, g]; None for any other line (boot messages)."""
+def _parse(line, need=LABELS):
+    """'DATA,kg,kg,kg' -> {label: g} for the cells in need; None for any other line (boot messages).
+    Cells not in need (Middle with 2 blocks) are ignored, NA or not."""
     r = line.split(",")
     if r[0] != "DATA" or len(r) != 4:
         return None
-    if "NA" in r:
-        raise ScaleError(f"load cells: no reading from {LABELS[r.index('NA') - 1]} (check that HX711's wiring)")
+    v = dict(zip(LABELS, r[1:]))
+    for k in need:
+        if v[k] == "NA":
+            raise ScaleError(f"load cells: no reading from {k} (check that HX711's wiring)")
     try:
-        g = [round(float(v) * 1000, 1) for v in r[1:]]   # sketch prints kg to 3 decimals = 1 g
+        g = {k: round(float(v[k]) * 1000, 1) for k in need}   # sketch prints kg to 3 decimals = 1 g
     except ValueError:
-        g = [math.nan]
-    if not all(map(math.isfinite, g)):
+        g = {"": math.nan}
+    if not all(map(math.isfinite, g.values())):
         raise ScaleError(f"load cells: bad line: {line}")
     return g
 
 
-def read_weights(ser):
+def read_weights(ser, need=LABELS):
     """Takes every DATA line buffered since the last call (waits for one if none).
-    -> {"Left": g, "Middle": g, "Right": g, "stable": bool}, newest reading; stable over the last WINDOW lines."""
+    -> {"Left": g, "Middle": g, "Right": g, "stable": bool} (only the labels in need), newest reading;
+    stable over the last WINDOW lines."""
     hist = ser.__dict__.setdefault("hist", [])
     new, err = False, None
     try:
@@ -64,7 +68,7 @@ def read_weights(ser):
             if not line:
                 break
             try:
-                g = _parse(line)
+                g = _parse(line, need)
             except ScaleError as e:              # one NA/bad line (boot, missed read): only fatal if it is the latest
                 err, new = e, False
                 hist.clear()
@@ -77,8 +81,8 @@ def read_weights(ser):
     if not new:
         raise err or ScaleError("load cells: no DATA line (unplugged? wrong port? sketch not running?)")
     del hist[:-WINDOW]
-    stable = len(hist) == WINDOW and all(max(c) - min(c) < STABLE_G for c in zip(*hist))
-    return dict(zip(LABELS, hist[-1]), stable=stable)
+    stable = len(hist) == WINDOW and all(max(h[k] for h in hist) - min(h[k] for h in hist) < STABLE_G for k in need)
+    return dict(hist[-1], stable=stable)
 
 
 class FakeSerial:
@@ -103,6 +107,10 @@ def selftest():
     w = read_weights(s)                                                # Left moved 10 g: not stable, newest value
     assert w["Left"] == 1010.0 and w["stable"] is False, w
     assert read_weights(FakeSerial(["DATA,1,NA,1", "DATA,1,1,1"]))["Left"] == 1000.0   # NA then good: fine
+    lr = ("Left", "Right")                                             # 2 blocks: Middle ignored, NA or not
+    assert read_weights(FakeSerial(["DATA,1.000,NA,0.990"]), lr) == {"Left": 1000.0, "Right": 990.0, "stable": False}
+    s = FakeSerial(["DATA,1,0.5,1", "DATA,1,0.9,1", "DATA,1,NA,1", "DATA,1,0.1,1"])
+    assert read_weights(s, lr)["stable"] is True                       # Middle moving does not unsettle Left/Right
     for bad, msg in ((["DATA,1,NA,1"], "Middle"), (["DATA,1,1,1", "DATA,1,1,NA"], "Right"), (["DATA,x,1,1"], "bad line"), (["DATA,nan,1,1"], "bad line"),
                      ([], "no DATA"), (["hello"] * 5, "no DATA")):
         try:

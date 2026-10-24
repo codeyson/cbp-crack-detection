@@ -1,5 +1,5 @@
 """
-pipeline.py - one capture -> 3 blocks -> dimensions + weight + crack length + grade per block.
+pipeline.py - one capture -> 3 blocks (2 with --n_blocks 2) -> dimensions + weight + crack length + grade per block.
 
     detect + crop (block_detect) -> L/W/H (dimensions.measure) -> weight (loadcell) -> crack U-Net on each crop
     (infer) -> crack length on the block interior (crack_length) -> grade classifier on each crop
@@ -10,6 +10,7 @@ Live:     python pipeline.py --cam 0          (models/best.pt + models/unet_effi
           SPACE runs everything (laser off), L reruns with the current frame as the laser-ON frame, q quits.
           --side_cam 1: second camera, side view, measures height (models/height_detection.pt); SPACE grabs both.
           --design d1|d2|d3|none: grade classifier (models/<design>_*.pth, default d1).
+          --n_blocks 2: 2 blocks on the Left and Right load cells (Middle empty, its load cell ignored).
 Offline:  python pipeline.py --img captures/xxx_raw.png [--laser_on on.png] [--side_img side.png]
 Self-test: python pipeline.py --selftest
 
@@ -23,7 +24,7 @@ import time
 import cv2
 import numpy as np
 
-from block_detect import detect_blocks, draw_overlay, open_camera
+from block_detect import LABELS, detect_blocks, draw_overlay, open_camera
 from crack_length import crack_length_mm
 from dimensions import draw as draw_dims, draw_side, load_calib, measure, side_height, side_heights, undistort
 from infer import predict_tiled
@@ -47,7 +48,7 @@ def run(off, model, predict_fn, calib, laser_on=None, scale_ref=None, height_mm=
         res = dict(detect_blocks(img, model, **det_kw), image=img, dims=False,
                    warnings=[f"{why}: dimensions skipped, crack length in px only"])
         if side is not None:                                          # height needs no top-view scale
-            res["warnings"] += side_height(res, side, side_model, calib, det_kw.get("conf", 0.5))
+            res["warnings"] += side_height(res, side, side_model, calib, det_kw.get("conf", 0.5), det_kw.get("n_expected", 3))
     res["timings"] = {"detect_dims_s": round(time.perf_counter() - t0, 3)}
     if weights:
         add_weights(res, weights, nominal_g, tol_g)
@@ -199,15 +200,16 @@ def run_camera(cam, out, meta, side_cam=None, scale=None, **kw):
 
     def weigh():
         try:
-            return read_weights(scale)
+            return read_weights(scale, LABELS[n])
         except ScaleError as e:
             print("WARNING:", e)
 
+    n = kw.get("n_expected", 3)
     live, last, weights = None, 0.0, None
     cap, frame = open_camera(cam)
     side_cap, side_frame = open_camera(side_cam) if side_cam is not None else (None, None)
     off, side, ok = None, None, True
-    det_kw = {k: kw[k] for k in ("model", "conf")}
+    det_kw = dict(model=kw["model"], conf=kw["conf"], n_expected=n)
     fx = 1280 / frame.shape[1]
     while ok:
         pv = cv2.resize(draw_overlay(frame, detect_blocks(frame, **det_kw)), None, fx=fx, fy=fx)
@@ -215,14 +217,14 @@ def run_camera(cam, out, meta, side_cam=None, scale=None, **kw):
             if time.monotonic() - last > 0.5:                         # poll, not every frame
                 live, last = weigh(), time.monotonic()
             t = "load cells: no reading" if live is None else (
-                f"L {live['Left']:.1f}  M {live['Middle']:.1f}  R {live['Right']:.1f} g  "
+                "  ".join(f"{k[0]} {live[k]:.1f}" for k in LABELS[n]) + " g  "
                 + ("stable" if live["stable"] else "NOT stable"))
             cv2.putText(pv, t, (10, pv.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
                         (0, 200, 0) if live and live["stable"] else (0, 0, 255), 2)
         cv2.imshow("pipeline (SPACE run, L laser frame, q quit)", pv)
         if side_cap is not None:
             sv = draw_side(side_frame, side_heights(side_frame, kw["side_model"], conf=kw["conf"],
-                                                    flip=kw["calib"].get("side_flip", False)))
+                                                    flip=kw["calib"].get("side_flip", False), n_expected=n))
             cv2.imshow("side camera (height)", cv2.resize(sv, None, fx=960 / sv.shape[1], fy=960 / sv.shape[1]))
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
@@ -326,6 +328,31 @@ def selftest():
     assert all(abs(b["side_px"] - 250) < 3 for b in saved), saved
     assert "weight_g" in saved[0] and "grade" in saved[0]
     assert os.path.exists(f"{d}/side.png") and os.path.exists(f"{d}/side_overlay.png")
+
+    from loadcell import FakeSerial, read_weights                     # 2 blocks: Left and Right, no Middle
+    two = [boxes[0], boxes[2]]
+    side2 = np.full((800, 1600, 3), 200, np.uint8)                    # side view: Left 250 px, Right 300 px tall
+    sb2 = [[100, 350, 500, 600], [1100, 300, 1500, 600]]
+    for x1, y1, x2, y2 in sb2:
+        side2[y1:y2, x1:x2] = np.clip(rng.normal(95, 25, (y2 - y1, x2 - x1, 3)), 0, 255)
+    w2 = read_weights(FakeSerial(["DATA,1.000,NA,0.990"]), LABELS[2])  # Middle NA: ignored, not fatal
+    for flip in (False, True):
+        for sc in (dict(mm_per_px_bed=0.5), {}):                       # with and without top-view scale
+            r = run(img, FakeYOLO(two), dark, dict(sc, side_coef=[0.2, 0.0], side_flip=flip), side=side2,
+                    side_model=FakeYOLO(sb2), weights=w2, nominal_g=1000, tol_g=50, classify=lambda c: "A", n_expected=2)
+            assert r["status"] == "ok" and [b["label"] for b in r["blocks"]] == ["Left", "Right"], (r["status"], r["warnings"])
+            assert [b["weight_g"] for b in r["blocks"]] == [1000.0, 990.0]
+            assert [round(b["H_mm"]) for b in r["blocks"]] == ([60, 50] if flip else [50, 60]), [b.get("H_mm") for b in r["blocks"]]
+            assert [b["grade"] for b in r["blocks"]] == ["A", "A"] and all(b["crack_px"] == 0 for b in r["blocks"])
+    assert draw_table(r).shape[0] == 70 + 50 * 2 and draw(r).shape == img.shape
+    d = tempfile.mkdtemp()
+    save(r, img, None, d, {})
+    d = os.path.join(d, os.listdir(d)[0])
+    with open(f"{d}/summary.json") as f:
+        saved = json.load(f)["blocks"]
+    assert [(b["label"], b["weight_g"]) for b in saved] == [("Left", 1000.0), ("Right", 990.0)], saved
+    assert os.path.exists(f"{d}/Right_crop.png") and not os.path.exists(f"{d}/Middle_crop.png")
+    assert run(img, yolo, dark, {}, n_expected=2)["status"] == "wrong_count"   # 3 seen, 2 expected
     print("selftest: ALL PASS")
 
 
@@ -349,6 +376,7 @@ def main():
     ap.add_argument("--nominal", help="L,W,H mm (from the standard)")
     ap.add_argument("--tol", help="L,W,H tolerance mm (from the standard)")
     ap.add_argument("--conf", type=float, default=0.3, help="YOLO confidence threshold")
+    ap.add_argument("--n_blocks", type=int, default=3, choices=(2, 3), help="blocks on the rig: 3 = Left, Middle, Right; 2 = Left, Right")
     ap.add_argument("--thresh", type=float, default=0.5, help="crack probability threshold")
     ap.add_argument("--edge_frac", type=float, default=0.10, help="ignore this fraction of each box side (walls, shadows)")
     ap.add_argument("--threads", type=int, default=0, help="CPU threads (0 = library default)")
@@ -371,7 +399,7 @@ def main():
     if a.scale:
         from loadcell import ScaleError, open_scale, read_weights
         try:
-            scale = open_scale(a.scale)
+            scale = open_scale(a.scale, need=LABELS[a.n_blocks])
         except ScaleError as e:
             ap.error(str(e))
     from ultralytics import YOLO
@@ -380,10 +408,10 @@ def main():
     triple = lambda s: tuple(map(float, s.split(","))) if s else None
     kw = dict(model=YOLO(a.weights), predict_fn=fn, calib=load_calib(a.calib), scale_ref=a.scale_ref,
               height_mm=a.height_mm, nominal=triple(a.nominal), tol=triple(a.tol), thresh=a.thresh,
-              conf=a.conf, edge_frac=a.edge_frac, side_model=YOLO(a.side_weights) if use_side else None,
+              conf=a.conf, n_expected=a.n_blocks, edge_frac=a.edge_frac, side_model=YOLO(a.side_weights) if use_side else None,
               nominal_g=a.nominal_g, tol_g=a.tol_g, classify=designs.load(a.design, grader) if grader else None)
     meta = dict(weights=os.path.basename(a.weights), ckpt=os.path.basename(a.ckpt), backbone=a.backbone,
-                thresh=a.thresh, edge_frac=a.edge_frac, device=device, design=a.design,
+                thresh=a.thresh, edge_frac=a.edge_frac, device=device, design=a.design, n_blocks=a.n_blocks,
                 **({"side_weights": os.path.basename(a.side_weights)} if use_side else {}))
     if a.cam is not None:
         return run_camera(a.cam, a.out, meta, side_cam=a.side_cam, scale=scale, **kw)
@@ -397,7 +425,7 @@ def main():
     weights = None
     if scale is not None:
         try:
-            weights = read_weights(scale)
+            weights = read_weights(scale, LABELS[a.n_blocks])
         except ScaleError as e:
             print("WARNING:", e)
     res = run(off, laser_on=on, side=side, weights=weights, **kw)

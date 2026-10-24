@@ -132,7 +132,7 @@ Pass/fail against the standard (fill in the real values, there are no defaults):
 python dimensions.py --img photo.jpg --calib calib.json --nominal 200,100,60 --tol 1.6,1.6,3.2
 ```
 
-Options: `--conf`, `--out` (default `dims_out`).
+Options: `--conf`, `--out` (default `dims_out`), `--n_blocks 2` for 2 blocks (Left, Right) instead of 3, top and side photos.
 Output: `*_dims.png` (outline, L/W/H, pass/fail) and `*_dims.json`. `bad_outline` = outline not rectangular enough, numbers not trusted.
 
 ## 1.2 Weight: load cells (`firmware/loadcells/`, `loadcell.py`)
@@ -173,7 +173,7 @@ Note: the model is DeepCrack-pretrained only. It is not reliable on pavers until
 
 ## End-to-end pipeline: `pipeline.py` (start here)
 
-Detect + crop, dimensions, weight, crack mask, crack length and grade for all 3 blocks in one go.
+Detect + crop, dimensions, weight, crack mask, crack length and grade for all 3 blocks (or 2, `--n_blocks 2`) in one go.
 Grade: **Reject** when the L/W/H or weight tolerance check fails, otherwise the classifier's A/B/C: it grades 330 px grayscale patches of the block interior (what it was trained on) and the most common patch grade wins (`grade_patches` in `summary.json`).
 The classifier is D1 (MobileNetV3, the trade-off winner, `models/d1_mobilenet_v3_large.pth`); `--design d2|d3` swaps it, `--design none` skips grading.
 
@@ -201,6 +201,15 @@ python pipeline.py --cam 0 --calib calib.json --scale COM5 --nominal 200,100,60 
 
 (`--nominal_g`/`--tol_g` above are example numbers: use the values from the standard.)
 
+Two blocks instead of 3: put them on the Left and Right load cells, leave the Middle empty, and add `--n_blocks 2`
+(default 3). The blocks are labelled Left and Right (left to right; side camera too, also with `side_flip`), the
+Middle load cell is ignored (an `NA` from it does not stop the weighing), and the results table, overlay and
+`summary.json` show the 2 blocks. Seeing 3 blocks with `--n_blocks 2` is `wrong_count`, not saved:
+
+```bash
+python pipeline.py --cam 0 --side_cam 1 --calib calib.json --scale COM5 --n_blocks 2
+```
+
 Offline on a saved frame (same code as live):
 
 ```bash
@@ -208,8 +217,8 @@ python pipeline.py --img captures/<stamp>_raw.png
 ```
 
 Scale: `--scale_ref 50` (ArUco in frame) or `mm_per_px_bed` in `--calib`. With neither, dimensions are skipped and crack length is in px.
-Also takes `--conf` (default 0.3 here), `--edge_frac` (default 0.10), `--weights`, `--ckpt`, `--laser_on`, `--side_weights`, `--height_mm`, `--nominal`, `--tol`, `--nominal_g`, `--tol_g`, `--thresh`, `--threads`, `--backbone`, `--design`.
-Output: `pipeline_out/<timestamp>/` with `off.png`, `laser.png`, `side.png`, `side_overlay.png`, `overlay.png`, `<Label>_crop.png`, `<Label>_mask.png`, `summary.json` (values incl. `weight_g`, `grade`, `class_grade`, warnings, per-step timings, model names). Nothing is saved unless exactly 3 blocks are found.
+Also takes `--conf` (default 0.3 here), `--edge_frac` (default 0.10), `--weights`, `--ckpt`, `--laser_on`, `--side_weights`, `--height_mm`, `--nominal`, `--tol`, `--nominal_g`, `--tol_g`, `--thresh`, `--threads`, `--backbone`, `--design`, `--n_blocks`.
+Output: `pipeline_out/<timestamp>/` with `off.png`, `laser.png`, `side.png`, `side_overlay.png`, `overlay.png`, `<Label>_crop.png`, `<Label>_mask.png`, `summary.json` (values incl. `weight_g`, `grade`, `class_grade`, warnings, per-step timings, model names). Nothing is saved unless exactly 3 blocks (`--n_blocks 2`: 2) are found.
 
 ## Training (Google Colab, not on this PC)
 
