@@ -10,7 +10,7 @@ Needs Python 3.11 and git. On Windows:
 git clone https://github.com/codeyson/cbp-crack-detection.git
 cd cbp-crack-detection
 python -m venv venv
-venv\Scriptsctivate
+venv/Scripts/Activate
 pip install -r requirements.txt
 python download_models.py
 ```
@@ -209,6 +209,13 @@ python pipeline.py --cam 0 --calib calib.json --scale COM5 --nominal_g 2400 --to
 
 (`--nominal_g`/`--tol_g` above are example numbers: use the values from the standard.)
 
+At startup the pipeline prints a `setup:` block saying what it can measure. Below the table, red lines say why a value is missing:
+- H shows `249 px`: the side camera is not calibrated yet. Run `dimensions.py --collect_side` (see 1.2); H is then in mm.
+- A failed value has ▲ (too big) or ▼ (too small) in `pipeline_ui.py`; it is red in `pipeline.py`'s table.
+- H shows `55*`: no measured height, this is `--height_mm` (assumed, not checked against the tolerance).
+- Weight `-`: the load-cell read failed at SPACE (reason in red, e.g. one HX711 gave no reading). A failed read
+  falls back to the preview's reading when that is under 2 s old. Check the cells with `python loadcell.py --port COM5`.
+
 Offline on a saved frame (same code as live):
 
 ```bash
@@ -217,7 +224,7 @@ python pipeline.py --img captures/<stamp>_raw.png
 
 Scale: `--scale_ref 50` (ArUco in frame) or `mm_per_px_bed` in `--calib`. With neither, dimensions are skipped and crack length is in px.
 Also takes `--conf` (default 0.3 here), `--edge_frac` (default 0.10), `--weights`, `--ckpt`, `--laser_on`, `--side_weights`, `--height_mm`, `--nominal`, `--tol`, `--nominal_g`, `--tol_g`, `--thresh`, `--threads`, `--backbone`, `--design`.
-Output: `pipeline_out/<timestamp>/` with `off.png`, `laser.png`, `side.png`, `side_overlay.png`, `overlay.png`, `<Label>_crop.png`, `<Label>_mask.png`, `summary.json` (values incl. `weight_g`, `grade`, `class_grade`, warnings, per-step timings, model names). Nothing is saved unless exactly 3 blocks are found.
+Output: `pipeline_out/<timestamp>/` with `off.png`, `laser.png`, `side.png`, `side_overlay.png`, `overlay.png` (with weight), `table.png` (the results window), `<Label>_crop.png`, `<Label>_mask.png`, `summary.json` (values incl. `weight_g`, `grade`, `class_grade`, warnings, per-step timings, model names). Every capture also adds one row per block to `pipeline_out/results.csv` (L, W, H, side px, weight, result, crack, grade), so all captures open in one spreadsheet. Nothing is saved unless exactly 3 blocks are found.
 
 ## Training (Google Colab, not on this PC)
 

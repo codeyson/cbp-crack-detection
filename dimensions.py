@@ -36,10 +36,13 @@ ARUCO = cv2.aruco.DICT_4X4_50
 
 
 # ----------------------------------------------------------------------------------------------- scale
-def load_calib(path):
+def load_calib(path, warn=False):
+    """warn: say so when the file is missing (the pipeline then runs with no scale and no height calibration)."""
     if path and os.path.exists(path):
         with open(path) as f:
             return json.load(f)
+    if warn and path:
+        print(f"WARNING: {path} not found (run from the repo folder?): no stored scale, no side/laser height")
     return {}
 
 
