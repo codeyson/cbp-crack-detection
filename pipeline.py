@@ -132,8 +132,6 @@ def draw(res):
             lines.append(f"{t} ({b['crack_pieces']} pcs)")
         if b.get("H_mm") is not None and not res["dims"]:            # dims mode already shows H
             lines.append(f"H {b['H_mm']:.1f} mm")
-        elif b.get("H_mm") is None and b.get("side_px") is not None:  # side camera not calibrated yet
-            lines.append(f"side {b['side_px']:.1f} px")
         for i, t in enumerate(lines):
             cv2.putText(vis, t, (b["box"][0] + 10, b["box"][1] + int((40 + 35 * (row + i)) * s)),
                         cv2.FONT_HERSHEY_SIMPLEX, s, (0, 0, 255), th)
@@ -175,8 +173,6 @@ def draw_table(res):
 def h_cell(b, res):
     if b.get("H_mm") is not None:
         return f"{b['H_mm']:.1f}"
-    if b.get("side_px") is not None:                                  # side camera without --fit_side
-        return f"{b['side_px']:.0f} px"
     return "-" if res.get("height_mm") is None else f"{res['height_mm']:g}*"
 
 
@@ -266,8 +262,9 @@ def run_camera(cam, out, meta, side_cam=None, scale=None, **kw):
                         (0, 200, 0) if live and live["stable"] else (0, 0, 255), 2)
         cv2.imshow("pipeline (SPACE run, L laser frame, q quit)", pv)
         if side_cap is not None:
-            sv = draw_side(side_frame, side_heights(side_frame, kw["side_model"], conf=kw["conf"],
-                                                    flip=kw["calib"].get("side_flip", False)))
+            sv = draw_side(side_frame, dict(side_heights(side_frame, kw["side_model"], conf=kw["conf"],
+                                                         flip=kw["calib"].get("side_flip", False)),
+                                            side_coef=kw["calib"].get("side_coef")))
             cv2.imshow("side camera (height)", cv2.resize(sv, None, fx=960 / sv.shape[1], fy=960 / sv.shape[1]))
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
@@ -367,9 +364,9 @@ def selftest():
     r = run(img, yolo, dark, {}, side=side, side_model=FakeYOLO(sboxes))                             # side not calibrated
     assert all(b.get("H_mm") is None and abs(b["side_px"] - 250) < 3 for b in r["blocks"])
     assert draw(r).shape == img.shape
-    assert all(h_cell(b, r) == f"{b['side_px']:.0f} px" for b in r["blocks"])   # table shows the px, not "-"
+    assert all(h_cell(b, r) == "-" for b in r["blocks"])             # uncalibrated: no px in the table
     t = draw_table(r)                                                # warnings say why: taller than 3 bare rows
-    assert t.shape[0] > 70 + 50 * 3 and any("fit_side" in w for w in r["warnings"]), r["warnings"]
+    assert t.shape[0] > 70 + 50 * 3 and any("known_mm" in w for w in r["warnings"]), r["warnings"]
     r2 = run(img, yolo, dark, dict(mm_per_px_bed=0.5), height_mm=55)  # no side camera: assumed height, marked *
     assert [h_cell(b, r2) for b in r2["blocks"]] == ["55*"] * 3 and draw_table(r2).ndim == 3
     from dimensions import load_calib
@@ -404,7 +401,7 @@ def report_setup(calib, a, use_side, scale):
     elif "laser_coef" in calib:
         h = "laser (press L after SPACE)"
     else:
-        h = ("side camera NOT calibrated: shows side px only (dimensions.py --fit_side)" if use_side else "not measured")
+        h = ("side camera NOT calibrated: H shows - (dimensions.py --known_mm)" if use_side else "not measured")
         if a.height_mm is not None:
             h += f"; table shows the assumed --height_mm {a.height_mm:g}*"
     print(f"setup: L/W {dims}\n       H {h}\n       weight {'on ' + a.scale if scale is not None else 'off (no --scale)'}")

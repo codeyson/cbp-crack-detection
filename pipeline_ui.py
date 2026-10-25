@@ -191,7 +191,7 @@ class App:
         left = tk.Frame(bottom, bg=BG)
         left.pack(side="left", fill="both", expand=True)
         cols = [("block", "Block", 110), ("L", "L (mm)", 100), ("W", "W (mm)", 100), ("H", "H (mm)", 110),
-                ("wt", "Weight (g)", 120), ("result", "Result", 140), ("grade", "Grade", 100)]
+                ("wt", "Weight (g)", 120), ("grade", "Grade", 100)]
         self.table = ttk.Treeview(left, columns=[c for c, _, _ in cols], show="headings", height=3, selectmode="none")
         for c, h, w in cols:
             self.table.heading(c, text=h)
@@ -287,7 +287,8 @@ class App:
                 s = self.side.latest()
                 ss = fit(s, w, h)
                 if self.side_det is not None:
-                    ss = draw_side(ss, scaled(self.side_det, ss.shape[1] / s.shape[1]))
+                    ss = draw_side(ss, dict(scaled(self.side_det, ss.shape[1] / s.shape[1]),
+                                            side_coef=self.kw["calib"].get("side_coef")))
                 self._show(1, ss)
             else:
                 self._show(1, placeholder(w, h, "no side camera (--side_cam)"))
@@ -368,13 +369,12 @@ class App:
         self.table.delete(*self.table.get_children())
         for b in res["blocks"]:
             tol = b.get("tolerance")
-            result = {"pass": "PASS", "fail": "FAIL", None: "-"}.get(tol, tol)
             grade = b.get("grade", "-")
             tag = "fail" if tol == "fail" or grade == "Reject" else "pass" if tol == "pass" else \
                 "none" if tol is None else "other"
             self.table.insert("", "end", tags=(tag,), values=(
                 b["label"], fmt(b.get("L_mm")), fmt(b.get("W_mm")), pipeline.h_cell(b, res), fmt(b.get("weight_g")),
-                result, grade))
+                grade))
 
         notes = ([f"{res['status']}: {res['message']}  (not saved)"] if res["status"] != "ok" else []) \
             + list(res.get("warnings", []))

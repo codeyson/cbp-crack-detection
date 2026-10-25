@@ -219,6 +219,8 @@ def side_heights(img, model, conf=0.5, flip=False, mid_frac=0.7, search_frac=0.0
 
 
 def draw_side(img, res):
+    """Side photo: YOLO boxes, the measured top/bottom edges (red) and the height in mm (res["side_coef"]), or
+    "not calibrated" (--known_mm / --fit_side)."""
     """Side photo: YOLO boxes, the measured top/bottom edges (red) and the height in px (mm is on the top overlay)."""
     vis = draw_overlay(img, res)
     s = max(0.6, vis.shape[1] / 1500.0)
@@ -227,21 +229,31 @@ def draw_side(img, res):
             x1, _, x2, y2 = b["box"]
             for y in (b["top"], b["bottom"]):
                 cv2.line(vis, (x1, round(y)), (x2, round(y)), (0, 0, 255), max(1, round(s)))
-            cv2.putText(vis, f"{b['h_px']:.1f} px",(x1 + 10, y2 - int(15 * s)), cv2.FONT_HERSHEY_SIMPLEX, s, (0, 0, 255), max(2, round(s * 2)))
+            t = (f"{np.polyval(res['side_coef'], b['h_px']):.1f} mm" if res.get("side_coef") is not None
+                 else "not calibrated")
+            cv2.putText(vis, t, (x1 + 10, y2 - int(15 * s)), cv2.FONT_HERSHEY_SIMPLEX, s, (0, 0, 255), max(2, round(s * 2)))
     return vis
+
+
+def one_block_coef(known_mm, h_px):
+    """side_coef from one caliper-measured block: mm = px * known_mm / h_px (camera distance fixed, so height in px
+    is proportional to height in mm).
+    ponytail: one point, no offset; the multi-height fit (--fit_side) also corrects an edge-detection offset."""
+    return [known_mm / h_px, 0.0]
 
 
 def side_height(res, side, side_model, calib, conf=0.5):
     """Side-camera height onto res["blocks"], matched by label: side_px, plus H_mm / H_source="side" when side_coef
     is calibrated (--fit_side). Sets res["side"]. Needs no top-view mm scale. Returns warnings."""
     res["side"] = side_heights(side, side_model, conf=conf, flip=calib.get("side_flip", False))
+    res["side"]["side_coef"] = calib.get("side_coef")
     warn, px = [], {}
     if res["side"]["status"] != "ok":
         warn.append(f"side camera: {res['side']['message']} Side height not measured.")
     else:
         px = {s["label"]: s["h_px"] for s in res["side"]["blocks"]}
     if "side_coef" not in calib:
-        warn.append("side camera not calibrated (--fit_side): height not measured, side_px only")
+        warn.append("side camera not calibrated (dimensions.py --known_mm): height not measured")
     for b in res["blocks"]:
         b["side_px"] = px.get(b["label"])
         if b["side_px"] is not None and "side_coef" in calib:
@@ -440,8 +452,10 @@ def selftest():
     assert [b["H_source"] for b in r["blocks"]] == ["side"] * 3, [b["H_source"] for b in r["blocks"]]
     assert [round(b["H_mm"]) for b in r["blocks"]] == [50, 56, 60], [b["H_mm"] for b in r["blocks"]]
     r = measure(img, FakeYOLO(boxes), calib, height_mm=hgt, side=side, side_model=FakeYOLO(sboxes))
-    assert r["blocks"][0]["side_px"] and r["blocks"][0]["H_mm"] is None and any("--fit_side" in w for w in r["warnings"])
+    assert r["blocks"][0]["side_px"] and r["blocks"][0]["H_mm"] is None and any("--known_mm" in w for w in r["warnings"])
     assert draw_side(side, s).shape == side.shape
+    assert np.polyval(one_block_coef(60.0, 300.0), 290.0) == 58.0
+    assert draw_side(side, dict(s, side_coef=one_block_coef(60.0, 300.0))).shape == side.shape
     print("selftest: ALL PASS")
 
 
@@ -466,6 +480,8 @@ def main():
     ap.add_argument("--square_mm", type=float, default=25.0)
     ap.add_argument("--fit_laser", metavar="CSV")
     ap.add_argument("--fit_side", metavar="CSV", help="rows side_px,height_mm -> side_coef in --calib")
+    ap.add_argument("--known_mm", type=float, help="with --side_img: caliper height of --block -> side_coef (one block)")
+    ap.add_argument("--block", default="Middle", choices=("Left", "Middle", "Right"), help="block measured for --known_mm")
     ap.add_argument("--make_marker", metavar="PNG")
     a = ap.parse_args()
     if a.selftest:
@@ -489,6 +505,13 @@ def main():
     side_model = YOLO(a.side_weights) if a.side_img else None
     if a.side_img and not a.img:   # calibration: side photo only
         s = side_heights(side, side_model, conf=a.conf, flip=calib.get("side_flip", False))
+        if a.known_mm:
+            px = {b["label"]: b["h_px"] for b in s["blocks"]}.get(a.block)
+            if px is None:
+                raise SystemExit(f"{a.block} block not found in {a.side_img} ({s['message'] or s['status']}): not saved")
+            calib["side_coef"] = one_block_coef(a.known_mm, px)
+            save_calib(a.calib, side_coef=calib["side_coef"])
+        s["side_coef"] = calib.get("side_coef")
         os.makedirs(a.out, exist_ok=True)
         stem = os.path.splitext(os.path.basename(a.side_img))[0]
         cv2.imwrite(f"{a.out}/{stem}_side.png", draw_side(side, s))

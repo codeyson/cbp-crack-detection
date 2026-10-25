@@ -95,8 +95,19 @@ Aim for max residual <= 0.3 mm. Redo calibration whenever the camera or laser mo
 
 Side-camera height (replaces the laser). Mount the second camera level with the blocks, lens at about half the block
 height (above the tops it sees a strip of the top face), facing the long side of the row so all 3 blocks stand side
-by side, plain backdrop behind. Needs `models/height_detection.pt`. Calibrate with blocks measured by calipers:
-photograph them on the rig, print each block's `side_px`, and write a CSV with rows `side_px,height_mm`:
+by side, plain backdrop behind. Needs `models/height_detection.pt`.
+
+Quick calibration, one block: measure the Middle block's height with calipers, take a side photo (`side.png` in
+`pipeline_out/<time>/` after a SPACE in `pipeline_ui.py`), then (replace 60.2 with your caliper reading):
+
+```bash
+python dimensions.py --side_img side.png --known_mm 60.2 --block Middle --calib calib.json --conf 0.3
+```
+
+It saves `side_coef` and prints all 3 heights in mm. Until then H shows `-`.
+
+Better calibration, several heights: photograph blocks measured by calipers on the rig, print each block's
+`side_px`, and write a CSV with rows `side_px,height_mm`:
 
 ```bash
 python dimensions.py --side_img side.jpg --conf 0.3
@@ -202,7 +213,7 @@ python pipeline.py --cam 0 --calib calib.json --scale COM5 --nominal 200,100,60 
 (`--nominal_g`/`--tol_g` above are example numbers: use the values from the standard.)
 
 At startup the pipeline prints a `setup:` block saying what it can measure. Below the table, red lines say why a value is missing:
-- H shows `249 px`: the side camera is not calibrated yet. Run `dimensions.py --fit_side` (see 1.2); H is then in mm.
+- H shows `-`: the side camera is not calibrated yet. Run `dimensions.py --known_mm` (see 1.2); H is then in mm.
 - H shows `55*`: no measured height, this is `--height_mm` (assumed, not checked against the tolerance).
 - Weight `-`: the load-cell read failed at SPACE (reason in red, e.g. one HX711 gave no reading). A failed read
   falls back to the preview's reading when that is under 2 s old. Check the cells with `python loadcell.py --port COM5`.
