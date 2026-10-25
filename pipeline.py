@@ -25,7 +25,7 @@ import numpy as np
 
 from block_detect import detect_blocks, draw_overlay, open_camera
 from crack_length import crack_length_mm
-from dimensions import draw as draw_dims, draw_side, load_calib, measure, side_height, side_heights, undistort
+from dimensions import NOMINAL, TOL, draw as draw_dims, draw_side, load_calib, measure, side_height, side_heights, undistort
 from infer import predict_tiled
 
 
@@ -48,6 +48,9 @@ def run(off, model, predict_fn, calib, laser_on=None, scale_ref=None, height_mm=
                    warnings=[f"{why}: dimensions skipped, crack length in px only"])
         if side is not None:                                          # height needs no top-view scale
             res["warnings"] += side_height(res, side, side_model, calib, det_kw.get("conf", 0.5))
+        if nominal and tol:
+            for b in res["blocks"]:
+                b.update(tolerance="incomplete", reasons=["L/W/H not measured (no scale)"])
     res["timings"] = {"detect_dims_s": round(time.perf_counter() - t0, 3)}
     if weights:
         add_weights(res, weights, nominal_g, tol_g)
@@ -99,16 +102,22 @@ def grade_patches(classify, crop, interior, patch=330):
 
 
 def add_weights(res, weights, nominal_g=None, tol_g=None):
-    """weight_g per block by label. Weight can only set "fail": a weight pass never upgrades the L/W/H status."""
+    """weight_g per block by label. A weight pass never upgrades the L/W/H status; a weight fail makes it "fail"
+    (reasons = the failures only), a missing weight makes a "pass" "incomplete"."""
     if not weights["stable"]:
         res.setdefault("warnings", []).append("load cells not stable")
     for b in res["blocks"]:
-        w = b["weight_g"] = weights.get(b["label"])
-        if w is None or nominal_g is None or tol_g is None:
+        w = b["weight_g"] = weights.get(b.get("label"))
+        if nominal_g is None or tol_g is None:
             continue
-        if abs(w - nominal_g) > tol_g:
+        failed = b.get("tolerance") == "fail"
+        if w is not None and abs(w - nominal_g) > tol_g:
+            b["reasons"] = (b["reasons"] if failed else []) + [f"weight {w:.0f} g vs {nominal_g:g} +/- {tol_g:g}"]
             b["tolerance"] = "fail"
-            b["reasons"] = (b.get("reasons") or []) + [f"weight {w:.0f} g vs {nominal_g:g} +/- {tol_g:g}"]
+        elif w is None and not failed:
+            b["reasons"] = (b.get("reasons") or []) + ["weight not measured"]
+            if b.get("tolerance") == "pass":
+                b["tolerance"] = "incomplete"
 
 
 def draw(res):
@@ -136,24 +145,35 @@ def draw(res):
     return vis
 
 
+def result_text(b):
+    """Result column: PASS | FAIL (checks that failed) | INCOMPLETE (what is missing) | - (no spec) -> (text, BGR)."""
+    tol = b.get("tolerance")
+    if tol in (None, "no_standard"):
+        return "-", (0, 0, 0)
+    if tol == "pass":
+        return "PASS", (0, 160, 0)
+    short = ", ".join(dict.fromkeys(r.split()[0] for r in b.get("reasons") or []))   # "H 63.9 mm vs ..." -> "H"
+    word, col = ("FAIL", (0, 0, 220)) if tol == "fail" else ("INCOMPLETE", (0, 140, 255))   # no/bad outline too
+    return (f"{word} ({short})" if short else word), col
+
+
 def draw_table(res):
-    """Results window: one row per block, L/W/H (mm), weight (g), PASS/FAIL. Missing values show "-"."""
+    """Results window: one row per block, L/W/H (mm), weight (g), Result, Grade. Missing values show "-"."""
     cols = [("Block", 20), ("L (mm)", 150), ("W (mm)", 270), ("H (mm)", 390), ("Weight (g)", 510), ("Result", 680),
-            ("Grade", 830)]
-    img = np.full((70 + 50 * len(res["blocks"]), 960, 3), 255, np.uint8)
+            ("Grade", 1010)]
+    img = np.full((70 + 50 * len(res["blocks"]), 1140, 3), 255, np.uint8)
     f = lambda v: "-" if v is None else f"{v:.1f}"
     put = lambda t, x, y, col=(0, 0, 0): cv2.putText(img, t, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, col, 2)
     for name, x in cols:
         put(name, x, 40)
-    cv2.line(img, (10, 55), (950, 55), (0, 0, 0), 1)
+    cv2.line(img, (10, 55), (img.shape[1] - 10, 55), (0, 0, 0), 1)
     for i, b in enumerate(res["blocks"]):
         y = 95 + 50 * i
-        tol = b.get("tolerance")
-        result, col = {"pass": ("PASS", (0, 160, 0)), "fail": ("FAIL", (0, 0, 220)), None: ("-", (0, 0, 0))}.get(
-            tol, (tol, (0, 140, 255)))
-        for t, (_, x) in zip([b["label"], f(b.get("L_mm")), f(b.get("W_mm")), f(b.get("H_mm")), f(b.get("weight_g"))],
-                             cols):
-            put(t, x, y)
+        result, col = result_text(b)
+        failed = {r.split()[0] for r in b.get("reasons") or []} if b.get("tolerance") == "fail" else set()
+        for t, key, (_, x) in zip([b["label"], f(b.get("L_mm")), f(b.get("W_mm")), f(b.get("H_mm")), f(b.get("weight_g"))],
+                                  (None, "L", "W", "H", "weight"), cols):
+            put(t, x, y, (0, 0, 220) if key in failed else (0, 0, 0))   # out-of-tolerance value in red
         put(result, cols[-2][1], y, col)
         g = b.get("grade", "-")
         put(g, cols[-1][1], y, {"A": (0, 160, 0), "B": (0, 140, 255), "C": (0, 90, 255), "Reject": (0, 0, 220)}.get(g, (0, 0, 0)))
@@ -221,8 +241,9 @@ def run_camera(cam, out, meta, side_cam=None, scale=None, **kw):
                         (0, 200, 0) if live and live["stable"] else (0, 0, 255), 2)
         cv2.imshow("pipeline (SPACE run, L laser frame, q quit)", pv)
         if side_cap is not None:
-            sv = draw_side(side_frame, side_heights(side_frame, kw["side_model"], conf=kw["conf"],
-                                                    flip=kw["calib"].get("side_flip", False)))
+            sv = draw_side(side_frame, dict(side_heights(side_frame, kw["side_model"], conf=kw["conf"],
+                                                         flip=kw["calib"].get("side_flip", False)),
+                                            side_coef=kw["calib"].get("side_coef")))
             cv2.imshow("side camera (height)", cv2.resize(sv, None, fx=960 / sv.shape[1], fy=960 / sv.shape[1]))
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
@@ -285,6 +306,16 @@ def selftest():
     assert [b["weight_g"] for b in r["blocks"]] == [1000.0, 1200.0, 990.0]
     assert r["blocks"][1]["tolerance"] == "fail" and any("weight" in s for s in r["blocks"][1]["reasons"])
     assert r["blocks"][0]["tolerance"] == "no_standard" and "load cells not stable" in r["warnings"]   # no L/W/H standard: weight pass is not PASS
+    b = dict(label="Left", tolerance="incomplete", reasons=["H not measured"])
+    add_weights(dict(blocks=[b]), dict(stable=True), 1000, 50)                             # no weight for Left
+    assert result_text(b)[0] == "INCOMPLETE (H, weight)", result_text(b)
+    b = dict(label="Left", tolerance="incomplete", reasons=["H not measured"])
+    add_weights(dict(blocks=[b]), dict(Left=1200.0, stable=True), 1000, 50)
+    assert result_text(b)[0] == "FAIL (weight)", result_text(b)                           # missing H not listed on a FAIL
+    b = dict(tolerance="fail", reasons=["L 206.0 mm vs 203 +/- 1.6", "W 99.0 mm vs 101 +/- 1.6"])
+    assert result_text(b)[0] == "FAIL (L, W)" and result_text(dict(tolerance="pass"))[0] == "PASS"
+    r2 = run(img, yolo, dark, {}, nominal=(203, 101, 60), tol=(1.6, 1.6, 3.2))           # no scale: nothing measured
+    assert result_text(r2["blocks"][0])[0] == "INCOMPLETE (L/W/H)", result_text(r2["blocks"][0])
     t = draw_table(r)
     assert t.ndim == 3 and t.shape[1] >= 600
     r = run(img, yolo, dark, dict(mm_per_px_bed=0.5), weights=w, nominal_g=1000, tol_g=50, classify=lambda c: "B")
@@ -346,8 +377,8 @@ def main():
     ap.add_argument("--calib", default="calib.json")
     ap.add_argument("--scale_ref", type=float, help="ArUco marker black-square side in mm (measured)")
     ap.add_argument("--height_mm", type=float, help="assumed block height when there is no laser frame")
-    ap.add_argument("--nominal", help="L,W,H mm (from the standard)")
-    ap.add_argument("--tol", help="L,W,H tolerance mm (from the standard)")
+    ap.add_argument("--nominal", default=NOMINAL, help=f"L,W,H mm (default {NOMINAL})")
+    ap.add_argument("--tol", default=TOL, help=f"L,W,H tolerance +/- mm (default {TOL})")
     ap.add_argument("--conf", type=float, default=0.3, help="YOLO confidence threshold")
     ap.add_argument("--thresh", type=float, default=0.5, help="crack probability threshold")
     ap.add_argument("--edge_frac", type=float, default=0.10, help="ignore this fraction of each box side (walls, shadows)")

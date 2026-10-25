@@ -216,7 +216,8 @@ def side_heights(img, model, conf=0.5, flip=False, mid_frac=0.7, search_frac=0.0
 
 
 def draw_side(img, res):
-    """Side photo: YOLO boxes, the measured top/bottom edges (red) and the height in px (mm is on the top overlay)."""
+    """Side photo: YOLO boxes, the measured top/bottom edges (red) and the height: mm when res["side_coef"] is set
+    (--fit_side), else px."""
     vis = draw_overlay(img, res)
     s = max(0.6, vis.shape[1] / 1500.0)
     for b in res["blocks"]:
@@ -224,14 +225,52 @@ def draw_side(img, res):
             x1, _, x2, y2 = b["box"]
             for y in (b["top"], b["bottom"]):
                 cv2.line(vis, (x1, round(y)), (x2, round(y)), (0, 0, 255), max(1, round(s)))
-            cv2.putText(vis, f"{b['h_px']:.1f} px",(x1 + 10, y2 - int(15 * s)), cv2.FONT_HERSHEY_SIMPLEX, s, (0, 0, 255), max(2, round(s * 2)))
+            t = (f"{np.polyval(res['side_coef'], b['h_px']):.1f} mm" if res.get("side_coef") is not None
+                 else f"{b['h_px']:.1f} px (not calibrated)")
+            cv2.putText(vis, t, (x1 + 10, y2 - int(15 * s)), cv2.FONT_HERSHEY_SIMPLEX, s, (0, 0, 255), max(2, round(s * 2)))
     return vis
+
+
+def collect_side(csv_path, cam, side_model, calib_path, conf=0.5):
+    """Side-camera calibration on the rig: SPACE grabs the frame, the terminal asks each block's caliper height (mm),
+    rows side_px,height_mm are appended to csv_path; q fits side_coef into calib_path (needs 2+ different heights)."""
+    from block_detect import open_camera
+    flip = load_calib(calib_path).get("side_flip", False)
+    cap, frame = open_camera(cam)
+    ok = True
+    while ok:
+        s = side_heights(frame, side_model, conf=conf, flip=flip)
+        cv2.imshow("side calibration (SPACE grab, q fit + quit)", cv2.resize(draw_side(frame, s), None, fx=960 / frame.shape[1], fy=960 / frame.shape[1]))
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("q"):
+            break
+        if key == ord(" "):
+            if s["status"] != "ok":
+                print(f"not grabbed: {s['message']}")
+            for b in s["blocks"] if s["status"] == "ok" else []:
+                h = input(f"{b['label']} ({b['h_px']:.1f} px): caliper height mm, Enter = skip: ").strip()
+                try:
+                    h = float(h) if h else None
+                except ValueError:
+                    print(f"not a number: {h!r}, skipped")
+                    h = None
+                if h is not None:
+                    with open(csv_path, "a") as f:
+                        f.write(f"{b['h_px']:.2f},{float(h)}\n")
+        ok, frame = cap.read()
+    cap.release()
+    cv2.destroyAllWindows()
+    d = np.atleast_2d(np.loadtxt(csv_path, delimiter=",")) if os.path.exists(csv_path) else np.empty((0, 2))
+    if len(set(d[:, 1])) < 2:
+        return print(f"{len(d)} rows in {csv_path}: need 2+ different heights (stack blocks, add a spacer). Not fitted.")
+    save_calib(calib_path, side_coef=fit_laser(csv_path, "side_px"))
 
 
 def side_height(res, side, side_model, calib, conf=0.5):
     """Side-camera height onto res["blocks"], matched by label: side_px, plus H_mm / H_source="side" when side_coef
     is calibrated (--fit_side). Sets res["side"]. Needs no top-view mm scale. Returns warnings."""
     res["side"] = side_heights(side, side_model, conf=conf, flip=calib.get("side_flip", False))
+    res["side"]["side_coef"] = calib.get("side_coef")
     warn, px = [], {}
     if res["side"]["status"] != "ok":
         warn.append(f"side camera: {res['side']['message']} Side height not measured.")
@@ -252,13 +291,19 @@ def calib_from(res):
     return {k: res[k] for k in ("mm_per_px_bed", "cam_height_mm") if res.get(k) is not None}
 
 
+NOMINAL, TOL = "203,101,60", "1.6,1.6,3.2"   # L,W,H mm and +/- mm: the rig's block spec (CLI defaults)
+
+
 def check_tolerance(dims, nominal=None, tol=None):
-    """dims/nominal/tol: (L, W, H) in mm, H may be None. Returns (status, reasons). status: pass|fail|no_standard."""
+    """dims/nominal/tol: (L, W, H) in mm, any may be None. Returns (status, reasons).
+    status: fail (any value out of tolerance; reasons = only the failures) | incomplete (none failed, some not
+    measured) | pass | no_standard. Each reason starts with the check's short name (L, W, H)."""
     if not nominal or not tol:
         return "no_standard", []
-    reasons = [f"{n} {v:.1f} mm vs {nom} +/- {t}" for n, v, nom, t in zip("LWH", dims, nominal, tol)
-               if v is not None and abs(v - nom) > t]
-    return ("fail" if reasons else "pass"), reasons
+    fails = [f"{n} {v:.1f} mm vs {nom:g} +/- {t:g}" for n, v, nom, t in zip("LWH", dims, nominal, tol)
+             if v is not None and abs(v - nom) > t]
+    missing = [f"{n} not measured" for n, v in zip("LWH", dims) if v is None]
+    return ("fail", fails) if fails else ("incomplete", missing) if missing else ("pass", [])
 
 
 def measure(img, model, calib, scale_ref=None, laser_on=None, height_mm=None, nominal=None, tol=None,
@@ -402,7 +447,8 @@ def selftest():
                 nominal=(200, 100, 60), tol=(1.6, 1.6, 3.2))
     assert [round(b["H_mm"]) for b in r["blocks"]] == [55, 60, 80], [b["H_mm"] for b in r["blocks"]]
     assert [b["tolerance"] for b in r["blocks"]] == ["fail", "pass", "fail"], [b["reasons"] for b in r["blocks"]]
-    assert check_tolerance((200, 100, None), (200, 100, 60), (1, 1, 1)) == ("pass", [])
+    assert check_tolerance((200, 100, None), (200, 100, 60), (1, 1, 1)) == ("incomplete", ["H not measured"])
+    assert check_tolerance((205, 100, None), (200, 100, 60), (1, 1, 1))[0] == "fail"         # a failure wins
     assert check_tolerance((200, 100, 60))[0] == "no_standard"
 
     # 4. --save_calib stores the scale measure() used: same values as a separate marker_scale() pass
@@ -439,6 +485,7 @@ def selftest():
     r = measure(img, FakeYOLO(boxes), calib, height_mm=hgt, side=side, side_model=FakeYOLO(sboxes))
     assert r["blocks"][0]["side_px"] and r["blocks"][0]["H_mm"] is None and any("--fit_side" in w for w in r["warnings"])
     assert draw_side(side, s).shape == side.shape
+    assert draw_side(side, r["side"]).shape == side.shape and draw_side(side, dict(s, side_coef=coef)).shape == side.shape
     print("selftest: ALL PASS")
 
 
@@ -454,8 +501,8 @@ def main():
     ap.add_argument("--save_calib", action="store_true", help="store the --scale_ref result in --calib")
     ap.add_argument("--scale_ref", type=float, help="ArUco marker black-square side in mm (measured)")
     ap.add_argument("--height_mm", type=float, help="assumed block height when there is no laser frame")
-    ap.add_argument("--nominal", help="L,W,H mm, e.g. 200,100,60 (from the standard)")
-    ap.add_argument("--tol", help="L,W,H tolerance mm, e.g. 1.6,1.6,3.2 (from the standard)")
+    ap.add_argument("--nominal", default=NOMINAL, help=f"L,W,H mm (default {NOMINAL})")
+    ap.add_argument("--tol", default=TOL, help=f"L,W,H tolerance +/- mm (default {TOL})")
     ap.add_argument("--conf", type=float, default=0.5)
     ap.add_argument("--out", default="dims_out")
     ap.add_argument("--calibrate_camera", metavar="DIR")
@@ -464,6 +511,8 @@ def main():
     ap.add_argument("--fit_laser", metavar="CSV")
     ap.add_argument("--fit_side", metavar="CSV", help="rows side_px,height_mm -> side_coef in --calib")
     ap.add_argument("--make_marker", metavar="PNG")
+    ap.add_argument("--collect_side", metavar="CSV", help="live side camera: SPACE, type the caliper heights; q fits side_coef")
+    ap.add_argument("--side_cam", type=int, default=1, help="side camera index for --collect_side")
     a = ap.parse_args()
     if a.selftest:
         return selftest()
@@ -479,6 +528,8 @@ def main():
     if a.fit_side:
         return save_calib(a.calib, side_coef=fit_laser(a.fit_side, "side_px"))
     from ultralytics import YOLO
+    if a.collect_side:
+        return collect_side(a.collect_side, a.side_cam, YOLO(a.side_weights), a.calib, a.conf)
     triple = lambda s: tuple(map(float, s.split(","))) if s else None
     calib = load_calib(a.calib)
     side = cv2.imread(a.side_img) if a.side_img else None
@@ -486,6 +537,7 @@ def main():
     side_model = YOLO(a.side_weights) if a.side_img else None
     if a.side_img and not a.img:   # calibration: side photo only
         s = side_heights(side, side_model, conf=a.conf, flip=calib.get("side_flip", False))
+        s["side_coef"] = calib.get("side_coef")
         os.makedirs(a.out, exist_ok=True)
         stem = os.path.splitext(os.path.basename(a.side_img))[0]
         cv2.imwrite(f"{a.out}/{stem}_side.png", draw_side(side, s))

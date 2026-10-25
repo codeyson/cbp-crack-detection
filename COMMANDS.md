@@ -95,12 +95,20 @@ Aim for max residual <= 0.3 mm. Redo calibration whenever the camera or laser mo
 
 Side-camera height (replaces the laser). Mount the second camera level with the blocks, lens at about half the block
 height (above the tops it sees a strip of the top face), facing the long side of the row so all 3 blocks stand side
-by side, plain backdrop behind. Needs `models/height_detection.pt`. Calibrate with blocks measured by calipers:
-photograph them on the rig, print each block's `side_px`, and write a CSV with rows `side_px,height_mm`:
+by side, plain backdrop behind. Needs `models/height_detection.pt`. Calibrate on the rig with blocks measured by
+calipers:
 
 ```bash
-python dimensions.py --side_img side.jpg --conf 0.3
+python dimensions.py --collect_side side_samples.csv --side_cam 1 --conf 0.3
 ```
+
+1. Put 3 objects of known height in the Left / Middle / Right slots; the window shows each one's height in px.
+2. Press SPACE (click the window first), then type each caliper height in mm in the terminal (Enter skips one).
+3. Swap in objects of other heights and repeat.
+4. Press q: it fits and saves `side_coef` into `calib.json` and prints the max residual (aim <= 0.3 mm).
+
+Rows are appended to `side_samples.csv`, so you can stop and continue later. Refit from the CSV alone, or from rows
+`side_px,height_mm` you wrote yourself (`python dimensions.py --side_img side.jpg --conf 0.3` prints `side_px`):
 
 ```bash
 python dimensions.py --fit_side side_samples.csv --calib calib.json
@@ -126,10 +134,10 @@ python dimensions.py --img off.jpg --laser_on on.jpg --calib calib.json
 
 Live webcam: use `pipeline.py --cam` (below).
 
-Pass/fail against the standard (fill in the real values, there are no defaults):
+Pass/fail against the block spec: default L,W,H 203,101,60 mm, tolerance +/- 1.6,1.6,3.2 mm (`NOMINAL`/`TOL` in `dimensions.py`). Override with `--nominal L,W,H --tol L,W,H`:
 
 ```bash
-python dimensions.py --img photo.jpg --calib calib.json --nominal 200,100,60 --tol 1.6,1.6,3.2
+python dimensions.py --img photo.jpg --calib calib.json
 ```
 
 Options: `--conf`, `--out` (default `dims_out`).
@@ -144,7 +152,7 @@ It streams `DATA,<left_kg>,<middle_kg>,<right_kg>` every 250 ms (`NA` = that HX7
 Flash the ESP32-S3 (once):
 
 1. Arduino IDE: install the "esp32" boards (Espressif) and the library "HX711" by Bogdan Necula.
-2. Open `firmware/loadcells/hx711_monitor.ino`, board "ESP32S3 Dev Module". Tools -> USB CDC On Boot must match the USB-C port the PC uses: **Disabled** for the "COM"/UART port (CH343, shows as "USB-Enhanced-SERIAL CH343"), **Enabled** for the native "USB" port. Wrong setting: the port opens but no `DATA` lines arrive ("does not stream like the ESP32").
+2. Open `firmware/loadcells/hx711_monitor.ino`, board "ESP32S3 Dev Module". The sketch prints on `Serial0` (UART0), so plug the PC into the "COM"/UART USB-C port (CH343, shows as "USB-Enhanced-SERIAL CH343"); USB CDC On Boot does not matter. The native "USB" port opens but no `DATA` lines arrive.
 3. Upload. Close the Serial Monitor before running the Python commands (only one program can hold the port).
 
 Find the port: Device Manager -> Ports (COM5 etc.) on Windows, `/dev/ttyACM0` on Linux.
@@ -193,10 +201,10 @@ python pipeline.py --cam 0 --calib calib.json
 ```
 
 With the load cells: add `--scale COM5`. The preview shows the live weights (red = not stable yet; wait for green before SPACE).
-A "results" window shows L, W, H, weight, PASS/FAIL and the grade per block:
+A "results" window shows L, W, H, weight, Result and the grade per block. Result: **PASS**; **FAIL (L, W, weight)** naming the checks that failed; **INCOMPLETE (H, weight)** when nothing failed but a value was not measured (e.g. side camera not calibrated, no load-cell reading). The L/W/H/weight values that failed are red.
 
 ```bash
-python pipeline.py --cam 0 --calib calib.json --scale COM5 --nominal 200,100,60 --tol 1.6,1.6,3.2 --nominal_g 2400 --tol_g 100
+python pipeline.py --cam 0 --calib calib.json --scale COM5 --nominal_g 2400 --tol_g 100
 ```
 
 (`--nominal_g`/`--tol_g` above are example numbers: use the values from the standard.)
